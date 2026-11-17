@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
   ArrowRight, Bell, CalendarDays, Camera, Check, ChevronLeft, ChevronRight,
-  Download, Heart, ImagePlus, LogOut, MessageCircle, MessageSquare, Plus, Send, Settings, Sparkles, Trash2, Upload, X
+  Download, Heart, ImagePlus, LogOut, MessageCircle, MessageSquare, Mic, MicOff, Phone, PhoneOff, Plus, Send, Settings, Sparkles, Trash2, Upload, Video, VideoOff, X
 } from 'lucide-react'
 import { isSupabaseConfigured, supabase } from './lib/supabase'
 import { uploadImage, optimizedImage } from './lib/cloudinary'
@@ -716,6 +716,308 @@ function ChatView({ messages, user, partnerName, loading, onSend }) {
   )
 }
 
+function VideoCall({ user, couple }) {
+  const [call, setCall] = useState({ phase: 'idle', error: '', localStream: null, remoteStream: null })
+  const [realtimeReady, setRealtimeReady] = useState(false)
+  const [connectionError, setConnectionError] = useState('')
+  const channelRef = useRef(null)
+  const callRef = useRef(call)
+  const readyRef = useRef(false)
+  const signalHandlerRef = useRef(null)
+  const remoteVideoRef = useRef(null)
+  const localVideoRef = useRef(null)
+  const partnerId = user.id === couple.partner_1_id ? couple.partner_2_id : couple.partner_1_id
+  const partnerDisplayName = user.id === couple.partner_1_id ? couple.partner_2_name : couple.partner_1_name
+
+  function updateCall(nextCall) {
+    const updated = typeof nextCall === 'function' ? nextCall(callRef.current) : nextCall
+    callRef.current = updated
+    setCall(updated)
+  }
+
+  function releaseCall(message = '') {
+    const current = callRef.current
+    current.peerConnection?.close()
+    current.localStream?.getTracks().forEach(track => track.stop())
+    updateCall({ phase: 'idle', error: message, localStream: null, remoteStream: null })
+  }
+
+  const sendSignal = useCallback(async (kind, callId, data = null) => {
+    const channel = channelRef.current
+    if (!channel || !readyRef.current) throw new Error('Koneksi panggilan belum siap. Coba lagi sebentar.')
+    const status = await channel.send({
+      type: 'broadcast',
+      event: 'call_signal',
+      payload: { from: user.id, callId, kind, data }
+    })
+    if (status !== 'ok') throw new Error('Sinyal panggilan gagal dikirim. Periksa koneksi lalu coba lagi.')
+  }, [user.id])
+
+  const requestIceServers = useCallback(async () => {
+    const { data: sessionData, error: sessionError } = await supabase.auth.getSession()
+    if (sessionError) throw sessionError
+    const accessToken = sessionData.session?.access_token
+    if (!accessToken) throw new Error('Sesi login berakhir. Masuk kembali untuk menelepon.')
+
+    const response = await fetch('/api/turn-credentials', {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${accessToken}` }
+    })
+    const result = await response.json().catch(() => ({}))
+    if (!response.ok) throw new Error(result.error || 'Server TURN belum siap. Periksa konfigurasi panggilan.')
+    if (!Array.isArray(result.iceServers) || !result.iceServers.length) throw new Error('Server TURN belum memberikan kredensial.')
+    return result.iceServers
+  }, [])
+
+  async function requestMediaStream() {
+    if (!navigator.mediaDevices?.getUserMedia) {
+      throw new Error('Panggilan video memerlukan koneksi HTTPS dan browser yang mendukung kamera.')
+    }
+    return navigator.mediaDevices.getUserMedia({ audio: true, video: true })
+  }
+
+  const makePeerConnection = useCallback((callId, stream, iceServers) => {
+    const peerConnection = new RTCPeerConnection({ iceServers })
+    stream.getTracks().forEach(track => peerConnection.addTrack(track, stream))
+    peerConnection.onicecandidate = event => {
+      if (!event.candidate) return
+      const current = callRef.current
+      if (current.callId !== callId) return
+      const candidate = event.candidate.toJSON()
+      if (!current.signalReady) {
+        updateCall(state => ({ ...state, pendingLocalCandidates: [...(state.pendingLocalCandidates || []), candidate] }))
+        return
+      }
+      sendSignal('candidate', callId, candidate).catch(error => {
+        updateCall(state => state.callId === callId ? { ...state, error: error.message } : state)
+      })
+    }
+    peerConnection.ontrack = event => {
+      const remoteStream = event.streams[0] || new MediaStream([event.track])
+      updateCall(state => state.callId === callId ? { ...state, remoteStream } : state)
+    }
+    peerConnection.onconnectionstatechange = () => {
+      if (peerConnection.connectionState === 'connected') {
+        updateCall(state => state.callId === callId ? { ...state, phase: 'active', error: '' } : state)
+      } else if (peerConnection.connectionState === 'failed') {
+        updateCall(state => state.callId === callId ? { ...state, error: 'Koneksi video gagal. Coba akhiri panggilan lalu telepon kembali.' } : state)
+      }
+    }
+    return peerConnection
+  }, [sendSignal])
+
+  async function flushRemoteCandidates(peerConnection) {
+    const current = callRef.current
+    const candidates = current.pendingRemoteCandidates || []
+    for (const candidate of candidates) await peerConnection.addIceCandidate(new RTCIceCandidate(candidate))
+    updateCall(state => ({ ...state, pendingRemoteCandidates: [] }))
+  }
+
+  async function flushLocalCandidates(callId) {
+    const current = callRef.current
+    const candidates = current.pendingLocalCandidates || []
+    updateCall(state => ({ ...state, signalReady: true, pendingLocalCandidates: [] }))
+    for (const candidate of candidates) {
+      await sendSignal('candidate', callId, candidate)
+    }
+  }
+
+  const handleSignal = useCallback(async signal => {
+    if (!signal || signal.from !== partnerId || typeof signal.callId !== 'string' || typeof signal.kind !== 'string') return
+    const current = callRef.current
+
+    if (signal.kind === 'offer') {
+      if (current.phase !== 'idle') {
+        await sendSignal('busy', signal.callId)
+        return
+      }
+      updateCall({
+        phase: 'incoming',
+        callId: signal.callId,
+        offer: signal.data,
+        pendingRemoteCandidates: [],
+        pendingLocalCandidates: [],
+        signalReady: false,
+        localStream: null,
+        remoteStream: null,
+        error: ''
+      })
+      return
+    }
+    if (signal.callId !== current.callId) return
+
+    if (signal.kind === 'answer' && current.peerConnection) {
+      await current.peerConnection.setRemoteDescription(new RTCSessionDescription(signal.data))
+      await flushRemoteCandidates(current.peerConnection)
+      updateCall(state => ({ ...state, phase: 'connecting' }))
+    } else if (signal.kind === 'candidate' && signal.data) {
+      if (current.peerConnection?.remoteDescription) {
+        await current.peerConnection.addIceCandidate(new RTCIceCandidate(signal.data))
+      } else {
+        updateCall(state => ({ ...state, pendingRemoteCandidates: [...(state.pendingRemoteCandidates || []), signal.data] }))
+      }
+    } else if (signal.kind === 'busy') {
+      releaseCall(`${partnerDisplayName || 'Pasangan'} sedang menerima panggilan lain.`)
+    } else if (signal.kind === 'reject') {
+      releaseCall(`${partnerDisplayName || 'Pasangan'} belum bisa menerima panggilan.`)
+    } else if (signal.kind === 'hangup') {
+      releaseCall('Panggilan telah berakhir.')
+    }
+  }, [flushRemoteCandidates, partnerDisplayName, partnerId, releaseCall, sendSignal])
+
+  signalHandlerRef.current = signal => handleSignal(signal)
+
+  useEffect(() => {
+    let active = true
+    const channel = supabase.channel(`couple:${couple.id}:calls`, { config: { private: true } })
+      .on('broadcast', { event: 'call_signal' }, ({ payload }) => {
+        signalHandlerRef.current?.(payload).catch(error => {
+          if (active) setConnectionError(error.message || 'Sinyal panggilan gagal diproses.')
+        })
+      })
+      .subscribe(status => {
+        if (!active) return
+        const connected = status === 'SUBSCRIBED'
+        readyRef.current = connected
+        setRealtimeReady(connected)
+        if (connected) setConnectionError('')
+        else if (status === 'CHANNEL_ERROR' || status === 'TIMED_OUT') {
+          setConnectionError('Koneksi panggilan tidak tersedia. Periksa Realtime Supabase dan kebijakan SQL.')
+        }
+      })
+    channelRef.current = channel
+
+    return () => {
+      active = false
+      readyRef.current = false
+      channelRef.current = null
+      const current = callRef.current
+      current.peerConnection?.close()
+      current.localStream?.getTracks().forEach(track => track.stop())
+      supabase.removeChannel(channel)
+    }
+  }, [couple.id])
+
+  useEffect(() => {
+    if (remoteVideoRef.current) remoteVideoRef.current.srcObject = call.remoteStream || null
+    if (localVideoRef.current) localVideoRef.current.srcObject = call.localStream || null
+  }, [call.localStream, call.remoteStream])
+
+  async function startCall() {
+    if (!partnerId || callRef.current.phase !== 'idle') return
+    setConnectionError('')
+    const callId = crypto.randomUUID()
+    updateCall({ phase: 'preparing', callId, pendingRemoteCandidates: [], pendingLocalCandidates: [], signalReady: false, error: '' })
+    try {
+      const iceServers = await requestIceServers()
+      if (callRef.current.callId !== callId) return
+      const localStream = await requestMediaStream()
+      if (callRef.current.callId !== callId) {
+        localStream.getTracks().forEach(track => track.stop())
+        return
+      }
+      const peerConnection = makePeerConnection(callId, localStream, iceServers)
+      updateCall(state => ({ ...state, peerConnection, localStream }))
+      const offer = await peerConnection.createOffer()
+      await peerConnection.setLocalDescription(offer)
+      await sendSignal('offer', callId, peerConnection.localDescription.toJSON())
+      await flushLocalCandidates(callId)
+      updateCall(state => ({ ...state, phase: 'calling' }))
+    } catch (error) {
+      releaseCall(error.message || 'Panggilan gagal dimulai. Periksa izin kamera dan mikrofon.')
+    }
+  }
+
+  async function acceptCall() {
+    const current = callRef.current
+    if (current.phase !== 'incoming') return
+    const callId = current.callId
+    updateCall(state => ({ ...state, phase: 'preparing', error: '' }))
+    try {
+      const iceServers = await requestIceServers()
+      if (callRef.current.callId !== callId) return
+      const localStream = await requestMediaStream()
+      if (callRef.current.callId !== callId) {
+        localStream.getTracks().forEach(track => track.stop())
+        return
+      }
+      const peerConnection = makePeerConnection(callId, localStream, iceServers)
+      updateCall(state => ({ ...state, peerConnection, localStream }))
+      await peerConnection.setRemoteDescription(new RTCSessionDescription(current.offer))
+      await flushRemoteCandidates(peerConnection)
+      const answer = await peerConnection.createAnswer()
+      await peerConnection.setLocalDescription(answer)
+      await sendSignal('answer', callId, peerConnection.localDescription.toJSON())
+      await flushLocalCandidates(callId)
+      updateCall(state => ({ ...state, phase: 'connecting' }))
+    } catch (error) {
+      releaseCall(error.message || 'Panggilan gagal dijawab. Periksa izin kamera dan mikrofon.')
+    }
+  }
+
+  async function endCall(kind = 'hangup') {
+    const current = callRef.current
+    if (current.callId && (current.phase === 'incoming' || current.peerConnection)) {
+      try { await sendSignal(kind, current.callId) } catch (error) { setConnectionError(error.message) }
+    }
+    releaseCall()
+  }
+
+  function toggleTrack(type) {
+    const stream = callRef.current.localStream
+    if (!stream) return
+    const tracks = type === 'audio' ? stream.getAudioTracks() : stream.getVideoTracks()
+    const enabled = tracks.some(track => !track.enabled)
+    tracks.forEach(track => { track.enabled = enabled })
+    updateCall(state => ({ ...state, [type === 'audio' ? 'muted' : 'videoDisabled']: !enabled }))
+  }
+
+  const isIncoming = call.phase === 'incoming'
+  const callStatus = call.phase === 'preparing' ? 'Menyiapkan kamera dan koneksi...'
+    : call.phase === 'calling' ? `Memanggil ${partnerDisplayName || 'pasangan'}...`
+      : call.phase === 'active' ? 'Panggilan tersambung'
+        : isIncoming ? `${partnerDisplayName || 'Pasangan'} menelepon...`
+          : 'Menghubungkan panggilan...'
+
+  return (
+    <>
+      <button type="button" onClick={startCall} disabled={!partnerId || !realtimeReady || call.phase !== 'idle'} aria-label="Mulai panggilan video" title={partnerId ? (realtimeReady ? 'Panggilan video' : 'Menghubungkan panggilan...') : 'Pasangan belum bergabung'} className="grid h-10 w-10 shrink-0 place-items-center rounded-xl border border-line bg-white text-terracotta disabled:opacity-40">
+        <Video size={18} />
+      </button>
+      {(connectionError || call.error) && call.phase === 'idle' && <p role="alert" className="absolute right-4 top-16 z-40 max-w-[calc(100vw-2rem)] rounded-xl bg-[#FFF1ED] px-3 py-2 text-xs text-[#A54D37]">{call.error || connectionError}</p>}
+      {call.phase !== 'idle' && (
+        <div className="fixed inset-0 z-[60] flex flex-col bg-zinc-950 text-white" role="dialog" aria-modal="true" aria-label="Panggilan video">
+          <header className="flex items-center justify-between gap-3 px-5 pb-3 pt-[max(1.25rem,env(safe-area-inset-top))]">
+            <div className="min-w-0">
+              <p className="truncate text-sm font-bold">{partnerDisplayName || 'Pasangan'}</p>
+              <p aria-live="polite" className="mt-1 text-xs text-zinc-400">{callStatus}</p>
+            </div>
+            {call.error && <p role="alert" className="max-w-[55%] text-right text-xs text-rose-300">{call.error}</p>}
+          </header>
+          <div className="relative flex min-h-0 flex-1 items-center justify-center overflow-hidden bg-zinc-900">
+            {isIncoming
+              ? <div className="text-center"><div className="mx-auto grid h-20 w-20 place-items-center rounded-full bg-zinc-800 text-rose-300"><Phone size={32} /></div><p className="mt-4 text-lg font-bold">Panggilan video masuk</p><p className="mt-1 text-sm text-zinc-400">dari {partnerDisplayName || 'pasanganmu'}</p></div>
+              : call.remoteStream
+                ? <video ref={remoteVideoRef} autoPlay playsInline className="h-full w-full object-contain" />
+                : <div className="text-center text-sm text-zinc-400"><Video size={28} className="mx-auto mb-3 opacity-60" />Menunggu video pasangan...</div>}
+            {!isIncoming && call.localStream && <video ref={localVideoRef} autoPlay playsInline muted className="absolute bottom-4 right-4 aspect-[3/4] w-24 rounded-2xl border border-white/20 bg-zinc-800 object-cover shadow-xl sm:bottom-6 sm:right-6 sm:w-32" />}
+          </div>
+          <footer className="safe-bottom flex items-center justify-center gap-4 px-4 pb-5 pt-4">
+            {isIncoming ? <>
+              <button type="button" onClick={() => endCall('reject')} aria-label="Tolak panggilan" className="grid h-14 w-14 place-items-center rounded-full bg-rose-600 text-white"><PhoneOff size={22} /></button>
+              <button type="button" onClick={acceptCall} aria-label="Terima panggilan" className="grid h-14 w-14 place-items-center rounded-full bg-emerald-500 text-white"><Phone size={22} /></button>
+            </> : <>
+              <button type="button" onClick={() => toggleTrack('audio')} aria-label={call.muted ? 'Aktifkan mikrofon' : 'Matikan mikrofon'} className="grid h-12 w-12 place-items-center rounded-full bg-zinc-800 text-white">{call.muted ? <MicOff size={20} /> : <Mic size={20} />}</button>
+              <button type="button" onClick={() => toggleTrack('video')} aria-label={call.videoDisabled ? 'Aktifkan kamera' : 'Matikan kamera'} className="grid h-12 w-12 place-items-center rounded-full bg-zinc-800 text-white">{call.videoDisabled ? <VideoOff size={20} /> : <Video size={20} />}</button>
+              <button type="button" onClick={() => endCall()} aria-label="Akhiri panggilan" className="grid h-14 w-14 place-items-center rounded-full bg-rose-600 text-white"><PhoneOff size={22} /></button>
+            </>}
+          </footer>
+        </div>
+      )}
+    </>
+  )
+}
+
 const tabFromHash = hash => hash === '#calendar' ? 'calendar' : hash === '#space' ? 'space' : hash === '#chat' ? 'chat' : 'feed'
 
 function AppShell({ user, couple, theme, onThemeChange, onSignOut, onLeaveRoom }) {
@@ -990,6 +1292,7 @@ function AppShell({ user, couple, theme, onThemeChange, onSignOut, onLeaveRoom }
               <p className="truncate text-xs font-bold">{couple.partner_1_name}{couple.partner_2_name ? ` & ${couple.partner_2_name}` : ''}</p>
               <p className="mt-1 text-[10px] text-taupe">{couple.partner_2_id ? `${todaySnaps.length} momen hari ini` : 'Menunggu pasangan bergabung'}</p>
             </div>
+            <VideoCall user={user} couple={couple} />
           </div>
         </header>
         <main className="flex-1 px-5 pb-28 pt-6">

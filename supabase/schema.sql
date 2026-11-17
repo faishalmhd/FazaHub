@@ -54,6 +54,28 @@ create index if not exists idx_snap_comments_couple_created
 create index if not exists idx_couple_messages_couple_created
   on public.couple_messages (couple_id, created_at);
 
+drop policy if exists "Couple members can receive private call signals" on realtime.messages;
+create policy "Couple members can receive private call signals" on realtime.messages
+  for select to authenticated using (
+    extension = 'broadcast'
+    and exists (
+      select 1 from public.couples
+      where couples.id::text = split_part(realtime.topic(), ':', 2)
+        and (couples.partner_1_id = auth.uid() or couples.partner_2_id = auth.uid())
+    )
+  );
+
+drop policy if exists "Couple members can send private call signals" on realtime.messages;
+create policy "Couple members can send private call signals" on realtime.messages
+  for insert to authenticated with check (
+    extension = 'broadcast'
+    and exists (
+      select 1 from public.couples
+      where couples.id::text = split_part(realtime.topic(), ':', 2)
+        and (couples.partner_1_id = auth.uid() or couples.partner_2_id = auth.uid())
+    )
+  );
+
 alter table public.couples enable row level security;
 alter table public.daily_snaps enable row level security;
 alter table public.snap_comments enable row level security;
