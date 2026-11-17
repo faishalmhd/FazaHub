@@ -767,7 +767,8 @@ function ChatView({ messages, user, partnerName, loading, onSend }) {
 }
 
 function VideoCall({ user, couple }) {
-  const [call, setCall] = useState({ phase: 'idle', error: '', notice: '', localStream: null, remoteStream: null })
+  const [call, setCall] = useState({ phase: 'idle', error: '', notice: '', relayMode: 'STUN', connectedAt: null, localStream: null, remoteStream: null })
+  const [durationSeconds, setDurationSeconds] = useState(0)
   const [realtimeReady, setRealtimeReady] = useState(false)
   const [connectionError, setConnectionError] = useState('')
   const channelRef = useRef(null)
@@ -777,11 +778,14 @@ function VideoCall({ user, couple }) {
   const callErrorTimerRef = useRef(null)
   const iceRecoveryTimerRef = useRef(null)
   const iceRestartInProgressRef = useRef(false)
+  const pendingCandidatesRef = useRef([])
+  const connectedAtRef = useRef(null)
   const readyRef = useRef(false)
   const signalHandlerRef = useRef(null)
   const callErrorHandlerRef = useRef(null)
   const videoTransceiverRef = useRef(null)
   const remoteVideoRef = useRef(null)
+  const remoteAudioRef = useRef(null)
   const localVideoRef = useRef(null)
   const partnerId = user.id === couple.partner_1_id ? couple.partner_2_id : couple.partner_1_id
   const partnerDisplayName = user.id === couple.partner_1_id ? couple.partner_2_name : couple.partner_1_name
@@ -798,12 +802,15 @@ function VideoCall({ user, couple }) {
     window.clearTimeout(iceRecoveryTimerRef.current)
     iceRecoveryTimerRef.current = null
     iceRestartInProgressRef.current = false
+    pendingCandidatesRef.current = []
+    connectedAtRef.current = null
+    setDurationSeconds(0)
     peerConnectionRef.current?.close()
     peerConnectionRef.current = null
     videoTransceiverRef.current = null
     localStreamRef.current?.getTracks().forEach(track => track.stop())
     localStreamRef.current = null
-    updateCall({ phase: 'idle', callId: null, error: message, notice: '', localStream: null, remoteStream: null })
+    updateCall({ phase: 'idle', callId: null, error: message, notice: '', connectedAt: null, localStream: null, remoteStream: null })
   }
 
   function showCallError(error, callId = callRef.current.callId) {
@@ -855,8 +862,18 @@ function VideoCall({ user, couple }) {
     if (status !== 'ok') throw new Error('Sinyal panggilan gagal dikirim. Periksa koneksi lalu coba lagi.')
   }, [user.id])
 
+  function markConnected(callId) {
+    if (callRef.current.callId !== callId || connectedAtRef.current) return
+    const connectedAt = Date.now()
+    connectedAtRef.current = connectedAt
+    updateCall(state => state.callId === callId ? { ...state, phase: 'active', connectedAt, error: '' } : state)
+  }
+
   const requestIceServers = useCallback(async () => {
-    const iceServers = [{ urls: 'stun:stun.l.google.com:19302' }]
+    const iceServers = [
+      { urls: 'stun:stun.l.google.com:19302' },
+      { urls: 'stun:stun1.l.google.com:19302' }
+    ]
     const appendIceServers = entries => {
       if (!Array.isArray(entries)) return
       entries.forEach(server => {
@@ -888,6 +905,7 @@ function VideoCall({ user, couple }) {
       const urls = Array.isArray(server.urls) ? server.urls : [server.urls]
       return urls.some(url => /^turns?:/i.test(url))
     }) ? '' : 'Server relay tidak tersedia; mencoba koneksi langsung.'
+    const relayMode = () => relayNotice() ? 'STUN' : 'TURN aktif'
     const configuredTurnUrl = String(import.meta.env.VITE_TURN_URL || '').trim()
     if (/^https:\/\//i.test(configuredTurnUrl)) {
       try {
@@ -912,22 +930,22 @@ function VideoCall({ user, couple }) {
     try {
       const { data: sessionData } = await supabase.auth.getSession()
       const accessToken = sessionData.session?.access_token
-      if (!accessToken) return { iceServers, notice: relayNotice() }
+      if (!accessToken) return { iceServers, notice: relayNotice(), relayMode: relayMode() }
 
       const response = await fetch('/api/turn-credentials', {
         method: 'POST',
         headers: { Authorization: `Bearer ${accessToken}` }
       })
-      if (!response.ok) return { iceServers, notice: relayNotice() }
+      if (!response.ok) return { iceServers, notice: relayNotice(), relayMode: relayMode() }
       const result = await response.json()
       if (!Array.isArray(result.iceServers) || !result.iceServers.length) {
-        return { iceServers, notice: relayNotice() }
+        return { iceServers, notice: relayNotice(), relayMode: relayMode() }
       }
       appendIceServers(result.iceServers)
-      return { iceServers, notice: relayNotice() }
+      return { iceServers, notice: relayNotice(), relayMode: relayMode() }
     } catch (error) {
       console.warn('FazaHub TURN credentials unavailable; using configured ICE servers.', error)
-      return { iceServers, notice: relayNotice() }
+      return { iceServers, notice: relayNotice(), relayMode: relayMode() }
     }
   }, [])
 
@@ -994,6 +1012,7 @@ function VideoCall({ user, couple }) {
     peerConnection.oniceconnectionstatechange = () => {
       const state = peerConnection.iceConnectionState
       if (state === 'connected' || state === 'completed') {
+        markConnected(callId)
         window.clearTimeout(iceRecoveryTimerRef.current)
         iceRecoveryTimerRef.current = null
         iceRestartInProgressRef.current = false
@@ -1012,15 +1031,25 @@ function VideoCall({ user, couple }) {
     peerConnection.ontrack = event => {
       const remoteStream = event.streams[0] || new MediaStream([event.track])
       updateCall(state => state.callId === callId ? { ...state, remoteStream } : state)
+      if (remoteVideoRef.current) {
+        remoteVideoRef.current.srcObject = remoteStream
+        remoteVideoRef.current.play().catch(() => {})
+      }
+      if (remoteAudioRef.current) {
+        remoteAudioRef.current.srcObject = remoteStream
+        remoteAudioRef.current.play().catch(() => {})
+      }
       event.track.onunmute = () => {
         updateCall(state => state.callId === callId
           ? { ...state, remoteStream: new MediaStream(remoteStream.getTracks()) }
           : state)
+        remoteVideoRef.current?.play().catch(() => {})
+        remoteAudioRef.current?.play().catch(() => {})
       }
     }
     peerConnection.onconnectionstatechange = () => {
       if (peerConnection.connectionState === 'connected') {
-        updateCall(state => state.callId === callId ? { ...state, phase: 'active', error: '' } : state)
+        markConnected(callId)
       } else if (peerConnection.connectionState === 'failed'
         && peerConnection.iceConnectionState !== 'failed'
         && peerConnection.iceConnectionState !== 'disconnected'
@@ -1035,10 +1064,17 @@ function VideoCall({ user, couple }) {
   }, [sendSignal])
 
   async function flushRemoteCandidates(peerConnection) {
-    const current = callRef.current
-    const candidates = current.pendingRemoteCandidates || []
-    for (const candidate of candidates) await peerConnection.addIceCandidate(new RTCIceCandidate(candidate))
-    updateCall(state => ({ ...state, pendingRemoteCandidates: [] }))
+    const candidates = pendingCandidatesRef.current
+    pendingCandidatesRef.current = []
+    const remoteUfrags = peerConnection.remoteDescription?.sdp.match(/^a=ice-ufrag:(.+)$/gm)?.map(line => line.slice('a=ice-ufrag:'.length)) || []
+    for (const candidate of candidates) {
+      if (candidate.usernameFragment && remoteUfrags.length && !remoteUfrags.includes(candidate.usernameFragment)) continue
+      try {
+        await peerConnection.addIceCandidate(new RTCIceCandidate(candidate))
+      } catch (error) {
+        console.warn('FazaHub skipped an ICE candidate that could not be applied.', error)
+      }
+    }
   }
 
   async function flushLocalCandidates(callId) {
@@ -1061,6 +1097,9 @@ function VideoCall({ user, couple }) {
         await sendSignal('busy', signal.callId)
         return
       }
+      pendingCandidatesRef.current = []
+      connectedAtRef.current = null
+      setDurationSeconds(0)
       updateCall({
         phase: 'incoming',
         callId: signal.callId,
@@ -1102,7 +1141,7 @@ function VideoCall({ user, couple }) {
       if (remoteDescription && candidateMatchesRemote) {
         await current.peerConnection.addIceCandidate(new RTCIceCandidate(signal.data))
       } else {
-        updateCall(state => ({ ...state, pendingRemoteCandidates: [...(state.pendingRemoteCandidates || []), signal.data] }))
+        pendingCandidatesRef.current.push(signal.data)
       }
     } else if (signal.kind === 'busy') {
       showCallError(new Error(`${partnerDisplayName || 'Pasangan'} sedang menerima panggilan lain.`), signal.callId)
@@ -1147,6 +1186,8 @@ function VideoCall({ user, couple }) {
       window.clearTimeout(iceRecoveryTimerRef.current)
       iceRecoveryTimerRef.current = null
       iceRestartInProgressRef.current = false
+      pendingCandidatesRef.current = []
+      connectedAtRef.current = null
       peerConnectionRef.current?.close()
       peerConnectionRef.current = null
       videoTransceiverRef.current = null
@@ -1157,17 +1198,35 @@ function VideoCall({ user, couple }) {
   }, [couple.id])
 
   useEffect(() => {
-    if (remoteVideoRef.current) remoteVideoRef.current.srcObject = call.remoteStream || null
+    if (remoteVideoRef.current) {
+      remoteVideoRef.current.srcObject = call.remoteStream || null
+      if (call.remoteStream) remoteVideoRef.current.play().catch(() => {})
+    }
+    if (remoteAudioRef.current) {
+      remoteAudioRef.current.srcObject = call.remoteStream || null
+      if (call.remoteStream) remoteAudioRef.current.play().catch(() => {})
+    }
     if (localVideoRef.current) localVideoRef.current.srcObject = call.localStream || null
   }, [call.localStream, call.remoteStream, call.videoDisabled])
+
+  useEffect(() => {
+    if (!call.connectedAt) return undefined
+    const updateDuration = () => setDurationSeconds(Math.floor((Date.now() - call.connectedAt) / 1000))
+    updateDuration()
+    const timerId = window.setInterval(updateDuration, 1000)
+    return () => window.clearInterval(timerId)
+  }, [call.connectedAt])
 
   async function startCall() {
     if (!partnerId || callRef.current.phase !== 'idle') return
     setConnectionError('')
     const callId = crypto.randomUUID()
-    updateCall({ phase: 'preparing', callId, pendingRemoteCandidates: [], pendingLocalCandidates: [], signalReady: false, error: '' })
+    pendingCandidatesRef.current = []
+    connectedAtRef.current = null
+    setDurationSeconds(0)
+    updateCall({ phase: 'preparing', callId, pendingRemoteCandidates: [], pendingLocalCandidates: [], signalReady: false, connectedAt: null, error: '' })
     try {
-      const { iceServers, notice: iceNotice } = await requestIceServers()
+      const { iceServers, notice: iceNotice, relayMode } = await requestIceServers()
       if (callRef.current.callId !== callId || callRef.current.phase === 'error') return
       const { stream: localStream, notice: mediaNotice } = await requestMediaStream()
       if (callRef.current.callId !== callId || callRef.current.phase === 'error') {
@@ -1181,7 +1240,8 @@ function VideoCall({ user, couple }) {
         peerConnection,
         localStream,
         videoDisabled: localStream.getVideoTracks().length === 0,
-        notice: [iceNotice, mediaNotice].filter(Boolean).join(' ')
+        notice: [iceNotice, mediaNotice].filter(Boolean).join(' '),
+        relayMode
       }))
       const offer = await peerConnection.createOffer()
       await peerConnection.setLocalDescription(offer)
@@ -1197,9 +1257,11 @@ function VideoCall({ user, couple }) {
     const current = callRef.current
     if (current.phase !== 'incoming') return
     const callId = current.callId
-    updateCall(state => ({ ...state, phase: 'preparing', error: '' }))
+    connectedAtRef.current = null
+    setDurationSeconds(0)
+    updateCall(state => ({ ...state, phase: 'preparing', connectedAt: null, error: '' }))
     try {
-      const { iceServers, notice: iceNotice } = await requestIceServers()
+      const { iceServers, notice: iceNotice, relayMode } = await requestIceServers()
       if (callRef.current.callId !== callId || callRef.current.phase === 'error') return
       const { stream: localStream, notice: mediaNotice } = await requestMediaStream()
       if (callRef.current.callId !== callId || callRef.current.phase === 'error') {
@@ -1213,7 +1275,8 @@ function VideoCall({ user, couple }) {
         peerConnection,
         localStream,
         videoDisabled: localStream.getVideoTracks().length === 0,
-        notice: [iceNotice, mediaNotice].filter(Boolean).join(' ')
+        notice: [iceNotice, mediaNotice].filter(Boolean).join(' '),
+        relayMode
       }))
       await peerConnection.setRemoteDescription(new RTCSessionDescription(current.offer))
       await flushRemoteCandidates(peerConnection)
@@ -1298,7 +1361,7 @@ function VideoCall({ user, couple }) {
   const isError = call.phase === 'error'
   const callStatus = call.phase === 'preparing' ? 'Menyiapkan kamera dan koneksi...'
     : call.phase === 'calling' ? `Memanggil ${partnerDisplayName || 'pasangan'}...`
-      : call.phase === 'active' ? 'Panggilan tersambung'
+      : call.phase === 'active' ? `Terhubung · ${String(Math.floor(durationSeconds / 60)).padStart(2, '0')}:${String(durationSeconds % 60).padStart(2, '0')}`
         : isError ? 'Panggilan berhenti'
         : isIncoming ? `${partnerDisplayName || 'Pasangan'} menelepon...`
           : 'Menghubungkan panggilan...'
@@ -1315,6 +1378,7 @@ function VideoCall({ user, couple }) {
             <div className="min-w-0">
               <p className="truncate text-sm font-bold">{partnerDisplayName || 'Pasangan'}</p>
               <p aria-live="polite" className="mt-1 text-xs text-zinc-400">{callStatus}</p>
+              <p className="mt-1 text-[10px] text-zinc-500">Relay: {call.relayMode || 'STUN'}</p>
             </div>
             {call.error && <p role="alert" className="max-w-[55%] text-right text-xs text-rose-300">{call.error}</p>}
           </header>
@@ -1325,10 +1389,14 @@ function VideoCall({ user, couple }) {
               ? <div className="text-center"><div className="mx-auto grid h-20 w-20 place-items-center rounded-full bg-zinc-800 text-rose-300"><Phone size={32} /></div><p className="mt-4 text-lg font-bold">Panggilan video masuk</p><p className="mt-1 text-sm text-zinc-400">dari {partnerDisplayName || 'pasanganmu'}</p></div>
               : call.remoteStream
                 ? <>
-                  <video ref={remoteVideoRef} autoPlay playsInline className="h-full w-full object-contain" />
+                  <video ref={remoteVideoRef} autoPlay playsInline muted className="h-full w-full object-contain" />
+                  <audio ref={remoteAudioRef} autoPlay playsInline className="hidden" />
                   {!call.remoteStream.getVideoTracks().some(track => track.readyState === 'live') && <p className="absolute rounded-xl bg-black/70 px-4 py-2 text-sm text-zinc-200">Menunggu kamera pasangan...</p>}
                 </>
-                : <div className="text-center text-sm text-zinc-400"><Video size={28} className="mx-auto mb-3 opacity-60" />Menunggu video pasangan...</div>}
+                : <>
+                  <div className="text-center text-sm text-zinc-400"><Video size={28} className="mx-auto mb-3 opacity-60" />Menunggu video pasangan...</div>
+                  <audio ref={remoteAudioRef} autoPlay playsInline className="hidden" />
+                </>}
             {!isIncoming && !isError && call.localStream?.getVideoTracks().length > 0 && <video ref={localVideoRef} autoPlay playsInline muted className="absolute bottom-4 right-4 aspect-[3/4] w-24 rounded-2xl border border-white/20 bg-zinc-800 object-cover shadow-xl sm:bottom-6 sm:right-6 sm:w-32" />}
             {call.notice && call.phase !== 'error' && <p role="status" className="absolute bottom-3 left-3 right-3 rounded-xl bg-black/70 px-3 py-2 text-center text-xs text-zinc-200">{call.notice}</p>}
           </div>
