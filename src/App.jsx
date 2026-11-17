@@ -8,6 +8,7 @@ import { uploadImage, optimizedImage } from './lib/cloudinary'
 import { exportJournal } from './lib/exportJournal'
 import { compressImage } from './utils/compressImage'
 import { checkLocalReminder, downloadCalendarAlarm, readReminderSettings, saveReminderSettings, showTestReminder } from './utils/reminder'
+import { readMessageNotificationSettings, requestMessageNotificationPermission, saveMessageNotificationSettings, showIncomingMessageNotification } from './utils/messageNotifications'
 
 const moods = [
   { label: 'Happy', emoji: '☀️' },
@@ -355,6 +356,10 @@ function SettingsView({ couple, user, partnerName, snaps, theme, onThemeChange, 
   const [leaving, setLeaving] = useState(false)
   const [roomError, setRoomError] = useState('')
   const [reminderBusy, setReminderBusy] = useState(false)
+  const [messageNotifications, setMessageNotifications] = useState(() => readMessageNotificationSettings(user.id))
+  const [messageNotificationError, setMessageNotificationError] = useState('')
+  const [messageNotificationBusy, setMessageNotificationBusy] = useState(false)
+  const [notificationPermission, setNotificationPermission] = useState(() => 'Notification' in window ? Notification.permission : 'unsupported')
   const isPartner1 = couple.partner_1_id === user.id
   const myName = isPartner1 ? couple.partner_1_name : couple.partner_2_name
   const otherName = isPartner1 ? couple.partner_2_name : couple.partner_1_name
@@ -379,6 +384,24 @@ function SettingsView({ couple, user, partnerName, snaps, theme, onThemeChange, 
       setReminderError(error.message || 'Pengaturan pengingat gagal. Coba lagi.')
     } finally {
       setReminderBusy(false)
+    }
+  }
+
+  async function toggleMessageNotifications() {
+    if (messageNotificationBusy) return
+    setMessageNotificationBusy(true)
+    setMessageNotificationError('')
+    try {
+      const next = { enabled: !messageNotifications.enabled }
+      if (next.enabled) {
+        setNotificationPermission(await requestMessageNotificationPermission())
+      }
+      saveMessageNotificationSettings(user.id, next)
+      setMessageNotifications(next)
+    } catch (error) {
+      setMessageNotificationError(error.message || 'Notifikasi pesan gagal diaktifkan.')
+    } finally {
+      setMessageNotificationBusy(false)
     }
   }
 
@@ -473,6 +496,22 @@ function SettingsView({ couple, user, partnerName, snaps, theme, onThemeChange, 
         <Button onClick={() => downloadCalendarAlarm(reminder.time)} className="mt-2 w-full border border-line bg-white px-4 py-3 text-xs text-charcoal">Tambah alarm ke Kalender HP (.ics)</Button>
         <p className="mt-3 text-[11px] leading-5 text-taupe">Notifikasi aplikasi hanya bisa dipastikan saat browser atau PWA berjalan. Untuk alarm yang tetap berbunyi saat aplikasi ditutup, impor file kalender dan pastikan aplikasi Kalender mengaktifkan notifikasinya.</p>
         {reminderError && <p role="alert" className="mt-3 text-xs leading-5 text-[#A54D37]">{reminderError}</p>}
+      </div>
+      <div className="mt-4 rounded-3xl border border-line bg-white p-5 shadow-soft">
+        <div className="flex items-start gap-3">
+          <div className="grid h-10 w-10 shrink-0 place-items-center rounded-xl bg-cream text-taupe"><MessageCircle size={19} /></div>
+          <div className="min-w-0 flex-1">
+            <p className="text-sm font-extrabold">Notifikasi pesan baru</p>
+            <p className="mt-1 text-xs leading-5 text-taupe">Beri tahu saat pasangan mengirim pesan ketika FazaHub sedang berjalan.</p>
+          </div>
+        </div>
+        <Button type="button" onClick={toggleMessageNotifications} disabled={messageNotificationBusy || notificationPermission === 'unsupported'} aria-pressed={messageNotifications.enabled} className={`mt-4 w-full px-4 py-3 text-sm ${messageNotifications.enabled ? 'border border-line bg-white text-charcoal' : 'bg-terracotta text-white'}`}>
+          <Bell size={16} />{messageNotificationBusy ? 'Memeriksa izin...' : messageNotifications.enabled ? 'Notifikasi pesan aktif · Matikan' : 'Aktifkan notifikasi pesan'}
+        </Button>
+        {notificationPermission === 'denied' && <p className="mt-3 text-[11px] leading-5 text-taupe">Izin saat ini diblokir oleh browser. Ubah izin notifikasi FazaHub di pengaturan browser atau perangkat, lalu aktifkan kembali di sini.</p>}
+        {notificationPermission === 'unsupported' && <p className="mt-3 text-[11px] leading-5 text-taupe">Browser ini belum mendukung notifikasi web.</p>}
+        <p className="mt-3 text-[11px] leading-5 text-taupe">Notifikasi pesan memerlukan izin dan koneksi FazaHub tetap berjalan di browser atau PWA. Pesan tidak menampilkan isi chat pada layar kunci.</p>
+        {messageNotificationError && <p role="alert" className="mt-3 text-xs leading-5 text-[#A54D37]">{messageNotificationError}</p>}
       </div>
       <div className="mt-4 rounded-3xl border border-line bg-white p-5 shadow-soft">
         <div className="flex items-start gap-3">
@@ -780,6 +819,18 @@ function AppShell({ user, couple, theme, onThemeChange, onSignOut, onLeaveRoom }
     setMessagesLoading(false)
   }, [couple.id])
 
+  const handleNewMessage = useCallback(payload => {
+    const message = payload.new
+    if (!message) return
+    if (message.user_id !== user.id && !(document.visibilityState === 'visible' && routeRef.current.tab === 'chat')) {
+      const senderName = message.user_id === couple.partner_1_id ? couple.partner_1_name : couple.partner_2_name || 'Pasangan'
+      showIncomingMessageNotification(user.id, couple.id, senderName).catch(notificationError => {
+        console.error('FazaHub message notification failed:', notificationError)
+      })
+    }
+    loadMessages()
+  }, [couple.id, couple.partner_1_id, couple.partner_1_name, couple.partner_2_name, loadMessages, user.id])
+
   async function addComment(snapId, body) {
     const { data, error: insertError } = await supabase.from('snap_comments')
       .insert({ snap_id: snapId, couple_id: couple.id, user_id: user.id, body })
@@ -839,10 +890,10 @@ function AppShell({ user, couple, theme, onThemeChange, onSignOut, onLeaveRoom }
     const channel = supabase.channel(`couple-snaps-${couple.id}`)
       .on('postgres_changes', { event: '*', schema: 'public', table: 'daily_snaps', filter: `couple_id=eq.${couple.id}` }, loadSnaps)
       .on('postgres_changes', { event: '*', schema: 'public', table: 'snap_comments', filter: `couple_id=eq.${couple.id}` }, loadComments)
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'couple_messages', filter: `couple_id=eq.${couple.id}` }, loadMessages)
+      .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'couple_messages', filter: `couple_id=eq.${couple.id}` }, handleNewMessage)
       .subscribe()
     return () => { supabase.removeChannel(channel) }
-  }, [couple.id, loadComments, loadMessages, loadSnaps])
+  }, [couple.id, handleNewMessage, loadComments, loadMessages, loadSnaps])
 
   const todaySnaps = useMemo(() => snaps.filter(snap => snap.snap_date === today), [snaps, today])
   const todayUserCount = todaySnaps.filter(snap => snap.user_id === user.id).length

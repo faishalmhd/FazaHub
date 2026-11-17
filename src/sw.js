@@ -14,6 +14,21 @@ self.addEventListener('activate', event => {
   event.waitUntil(self.clients.claim())
 })
 
+self.addEventListener('notificationclick', event => {
+  if (event.notification.data?.destination !== 'chat') return
+  event.notification.close()
+  event.waitUntil((async () => {
+    const clients = await self.clients.matchAll({ type: 'window', includeUncontrolled: true })
+    for (const client of clients) {
+      if (new URL(client.url).origin !== self.location.origin) continue
+      await client.navigate(new URL('/#chat', self.location.origin).href)
+      await client.focus()
+      return
+    }
+    await self.clients.openWindow(new URL('/#chat', self.location.origin).href)
+  })())
+})
+
 registerRoute(
   ({ url }) => url.origin === 'https://res.cloudinary.com',
   new CacheFirst({
