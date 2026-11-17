@@ -728,6 +728,7 @@ function VideoCall({ user, couple }) {
   const readyRef = useRef(false)
   const signalHandlerRef = useRef(null)
   const callErrorHandlerRef = useRef(null)
+  const videoTransceiverRef = useRef(null)
   const remoteVideoRef = useRef(null)
   const localVideoRef = useRef(null)
   const partnerId = user.id === couple.partner_1_id ? couple.partner_2_id : couple.partner_1_id
@@ -744,6 +745,7 @@ function VideoCall({ user, couple }) {
     callErrorTimerRef.current = null
     peerConnectionRef.current?.close()
     peerConnectionRef.current = null
+    videoTransceiverRef.current = null
     localStreamRef.current?.getTracks().forEach(track => track.stop())
     localStreamRef.current = null
     updateCall({ phase: 'idle', callId: null, error: message, notice: '', localStream: null, remoteStream: null })
@@ -772,6 +774,7 @@ function VideoCall({ user, couple }) {
 
     peerConnectionRef.current?.close()
     peerConnectionRef.current = null
+    videoTransceiverRef.current = null
     localStreamRef.current?.getTracks().forEach(track => track.stop())
     localStreamRef.current = null
     updateCall(state => state.callId === callId
@@ -847,6 +850,9 @@ function VideoCall({ user, couple }) {
     const peerConnection = new RTCPeerConnection({ iceServers })
     peerConnectionRef.current = peerConnection
     stream.getTracks().forEach(track => peerConnection.addTrack(track, stream))
+    if (!stream.getVideoTracks().length) peerConnection.addTransceiver('video', { direction: 'sendrecv' })
+    videoTransceiverRef.current = peerConnection.getTransceivers()
+      .find(transceiver => transceiver.receiver.track.kind === 'video') || null
     peerConnection.onicecandidate = event => {
       if (!event.candidate) return
       const current = callRef.current
@@ -863,6 +869,11 @@ function VideoCall({ user, couple }) {
     peerConnection.ontrack = event => {
       const remoteStream = event.streams[0] || new MediaStream([event.track])
       updateCall(state => state.callId === callId ? { ...state, remoteStream } : state)
+      event.track.onunmute = () => {
+        updateCall(state => state.callId === callId
+          ? { ...state, remoteStream: new MediaStream(remoteStream.getTracks()) }
+          : state)
+      }
     }
     peerConnection.onconnectionstatechange = () => {
       if (peerConnection.connectionState === 'connected') {
@@ -968,6 +979,7 @@ function VideoCall({ user, couple }) {
       window.clearTimeout(callErrorTimerRef.current)
       peerConnectionRef.current?.close()
       peerConnectionRef.current = null
+      videoTransceiverRef.current = null
       localStreamRef.current?.getTracks().forEach(track => track.stop())
       localStreamRef.current = null
       supabase.removeChannel(channel)
@@ -977,7 +989,7 @@ function VideoCall({ user, couple }) {
   useEffect(() => {
     if (remoteVideoRef.current) remoteVideoRef.current.srcObject = call.remoteStream || null
     if (localVideoRef.current) localVideoRef.current.srcObject = call.localStream || null
-  }, [call.localStream, call.remoteStream])
+  }, [call.localStream, call.remoteStream, call.videoDisabled])
 
   async function startCall() {
     if (!partnerId || callRef.current.phase !== 'idle') return
@@ -1053,6 +1065,55 @@ function VideoCall({ user, couple }) {
     releaseCall()
   }
 
+  async function toggleVideo() {
+    const stream = localStreamRef.current
+    const callId = callRef.current.callId
+    const videoTracks = stream?.getVideoTracks() || []
+    if (videoTracks.length) {
+      const enable = !videoTracks.some(track => track.enabled)
+      videoTracks.forEach(track => { track.enabled = enable })
+      updateCall(state => ({ ...state, videoDisabled: !enable, error: '' }))
+      return
+    }
+
+    let cameraTrack
+    try {
+      if (!navigator.mediaDevices?.getUserMedia) throw new Error('Browser ini tidak mendukung akses kamera.')
+      const cameraStream = await navigator.mediaDevices.getUserMedia({ audio: false, video: true })
+      cameraTrack = cameraStream.getVideoTracks()[0]
+      const transceiver = videoTransceiverRef.current
+      if (!cameraTrack || !transceiver || callRef.current.callId !== callId || localStreamRef.current !== stream) {
+        cameraStream.getTracks().forEach(track => track.stop())
+        throw new Error('Kamera belum dapat ditambahkan ke panggilan. Akhiri lalu mulai ulang panggilan.')
+      }
+
+      await transceiver.sender.replaceTrack(cameraTrack)
+      if (callRef.current.callId !== callId || localStreamRef.current !== stream) {
+        await transceiver.sender.replaceTrack(null)
+        cameraTrack.stop()
+        return
+      }
+      localStreamRef.current.addTrack(cameraTrack)
+      cameraTrack.onended = () => {
+        updateCall(state => state.callId === callId
+          ? { ...state, videoDisabled: true, notice: 'Kamera terputus. Panggilan suara tetap aktif.' }
+          : state)
+      }
+      updateCall(state => ({ ...state, localStream: localStreamRef.current, videoDisabled: false, error: '', notice: '' }))
+    } catch (error) {
+      cameraTrack?.stop()
+      const name = error?.name || 'Error'
+      const message = error?.name === 'NotAllowedError' || error?.name === 'PermissionDeniedError'
+        ? 'Izin kamera ditolak. Izinkan kamera di pengaturan browser, lalu coba lagi.'
+        : error?.name === 'NotReadableError'
+          ? 'Kamera sedang dipakai aplikasi/tab lain. Tutup aplikasi tersebut, lalu coba lagi.'
+          : error?.name === 'NotFoundError'
+            ? 'Kamera tidak ditemukan. Periksa perangkat, lalu coba lagi.'
+            : error?.message || `Kamera gagal diaktifkan (${name}).`
+      updateCall(state => ({ ...state, error: message }))
+    }
+  }
+
   function toggleTrack(type) {
     const stream = localStreamRef.current
     if (!stream) return
@@ -1093,7 +1154,10 @@ function VideoCall({ user, couple }) {
               : isIncoming
               ? <div className="text-center"><div className="mx-auto grid h-20 w-20 place-items-center rounded-full bg-zinc-800 text-rose-300"><Phone size={32} /></div><p className="mt-4 text-lg font-bold">Panggilan video masuk</p><p className="mt-1 text-sm text-zinc-400">dari {partnerDisplayName || 'pasanganmu'}</p></div>
               : call.remoteStream
-                ? <video ref={remoteVideoRef} autoPlay playsInline className="h-full w-full object-contain" />
+                ? <>
+                  <video ref={remoteVideoRef} autoPlay playsInline className="h-full w-full object-contain" />
+                  {!call.remoteStream.getVideoTracks().some(track => track.readyState === 'live') && <p className="absolute rounded-xl bg-black/70 px-4 py-2 text-sm text-zinc-200">Menunggu kamera pasangan...</p>}
+                </>
                 : <div className="text-center text-sm text-zinc-400"><Video size={28} className="mx-auto mb-3 opacity-60" />Menunggu video pasangan...</div>}
             {!isIncoming && !isError && call.localStream?.getVideoTracks().length > 0 && <video ref={localVideoRef} autoPlay playsInline muted className="absolute bottom-4 right-4 aspect-[3/4] w-24 rounded-2xl border border-white/20 bg-zinc-800 object-cover shadow-xl sm:bottom-6 sm:right-6 sm:w-32" />}
             {call.notice && call.phase !== 'error' && <p role="status" className="absolute bottom-3 left-3 right-3 rounded-xl bg-black/70 px-3 py-2 text-center text-xs text-zinc-200">{call.notice}</p>}
@@ -1104,7 +1168,7 @@ function VideoCall({ user, couple }) {
               <button type="button" onClick={acceptCall} aria-label="Terima panggilan" className="grid h-14 w-14 place-items-center rounded-full bg-emerald-500 text-white"><Phone size={22} /></button>
             </> : <>
               <button type="button" onClick={() => toggleTrack('audio')} disabled={!call.localStream?.getAudioTracks().length} aria-label={call.muted ? 'Aktifkan mikrofon' : 'Matikan mikrofon'} className="grid h-12 w-12 place-items-center rounded-full bg-zinc-800 text-white disabled:opacity-40">{call.muted ? <MicOff size={20} /> : <Mic size={20} />}</button>
-              <button type="button" onClick={() => toggleTrack('video')} disabled={!call.localStream?.getVideoTracks().length} aria-label={call.videoDisabled ? 'Aktifkan kamera' : 'Matikan kamera'} className="grid h-12 w-12 place-items-center rounded-full bg-zinc-800 text-white disabled:opacity-40">{call.videoDisabled || !call.localStream?.getVideoTracks().length ? <VideoOff size={20} /> : <Video size={20} />}</button>
+              <button type="button" onClick={toggleVideo} disabled={!call.localStream || isError} aria-label={call.videoDisabled || !call.localStream?.getVideoTracks().length ? 'Aktifkan kamera' : 'Matikan kamera'} className="grid h-12 w-12 place-items-center rounded-full bg-zinc-800 text-white disabled:opacity-40">{call.videoDisabled || !call.localStream?.getVideoTracks().length ? <VideoOff size={20} /> : <Video size={20} />}</button>
               <button type="button" onClick={() => endCall()} aria-label="Akhiri panggilan" className="grid h-14 w-14 place-items-center rounded-full bg-rose-600 text-white"><PhoneOff size={22} /></button>
             </>}
           </footer>
