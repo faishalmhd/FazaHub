@@ -645,8 +645,22 @@ function AddSnapModal({ userId, coupleId, onClose, onSaved }) {
 function ChatView({ messages, user, partnerName, loading, onSend }) {
   const [draft, setDraft] = useState('')
   const [busy, setBusy] = useState(false)
+  const [uploadProgress, setUploadProgress] = useState(0)
   const [error, setError] = useState('')
+  const [selectedImage, setSelectedImage] = useState(null)
+  const [previewUrl, setPreviewUrl] = useState('')
+  const [imageToView, setImageToView] = useState('')
   const bottomRef = useRef(null)
+  const imageInputRef = useRef(null)
+  const cloudName = import.meta.env.VITE_CLOUDINARY_CLOUD_NAME
+  const uploadPreset = import.meta.env.VITE_CLOUDINARY_UPLOAD_PRESET
+
+  useEffect(() => {
+    if (!selectedImage) { setPreviewUrl(''); return undefined }
+    const url = URL.createObjectURL(selectedImage)
+    setPreviewUrl(url)
+    return () => URL.revokeObjectURL(url)
+  }, [selectedImage])
 
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: 'smooth', block: 'end' })
@@ -655,17 +669,38 @@ function ChatView({ messages, user, partnerName, loading, onSend }) {
   async function submit(event) {
     event.preventDefault()
     const body = draft.trim()
-    if (!body || busy) return
+    if ((!body && !selectedImage) || busy) return
     setBusy(true)
     setError('')
+    setUploadProgress(0)
     try {
-      await onSend(body)
+      let imageUrl = null
+      if (selectedImage) {
+        if (!cloudName || !uploadPreset) throw new Error('Cloudinary belum dikonfigurasi untuk mengirim foto.')
+        const compressedImage = await compressImage(selectedImage)
+        imageUrl = await uploadImage(compressedImage, cloudName, uploadPreset, setUploadProgress)
+      }
+      await onSend(body, imageUrl)
       setDraft('')
+      setSelectedImage(null)
     } catch (sendError) {
       setError(sendError.message || 'Pesan gagal dikirim. Coba lagi.')
     } finally {
       setBusy(false)
     }
+  }
+
+  function chooseImage(event) {
+    const file = event.currentTarget.files?.[0]
+    event.currentTarget.value = ''
+    if (!file) return
+    if (!file.type.startsWith('image/') && !/\.(jpe?g|png|gif|webp|heic|heif|avif)$/i.test(file.name)) {
+      setError('Pilih file gambar ya.')
+      return
+    }
+    if (file.size > 20 * 1024 * 1024) { setError('Ukuran foto maksimal 20 MB sebelum kompresi.'); return }
+    setError('')
+    setSelectedImage(file)
   }
 
   return (
@@ -683,7 +718,10 @@ function ChatView({ messages, user, partnerName, loading, onSend }) {
             return <div key={message.id} className={`flex ${mine ? 'justify-end' : 'justify-start'}`}>
               <article className={`max-w-[84%] rounded-2xl px-3.5 py-2.5 ${mine ? 'rounded-br-sm bg-white text-black' : 'rounded-bl-sm bg-[#25252B] text-zinc-100'}`}>
                 {!mine && <p className="mb-1 text-[10px] font-bold text-rose-400">{partnerName(message.user_id)}</p>}
-                <p className="whitespace-pre-wrap break-words text-sm leading-5">{message.body}</p>
+                {message.image_url && <button type="button" onClick={() => setImageToView(message.image_url)} className="mb-1 block overflow-hidden rounded-xl" aria-label="Buka foto">
+                  <img src={optimizedImage(message.image_url, true)} alt="Foto dalam pesan" loading="lazy" className="max-h-64 w-full min-w-36 object-cover" />
+                </button>}
+                {message.body && <p className="whitespace-pre-wrap break-words text-sm leading-5">{message.body}</p>}
                 <time className={`mt-1 block text-right font-mono text-[9px] ${mine ? 'text-zinc-500' : 'text-zinc-400'}`}>{new Intl.DateTimeFormat('id-ID', { hour: '2-digit', minute: '2-digit' }).format(new Date(message.created_at))}</time>
               </article>
             </div>
@@ -691,7 +729,14 @@ function ChatView({ messages, user, partnerName, loading, onSend }) {
         <div ref={bottomRef} />
       </div>
       <form onSubmit={submit} className="border-t border-line bg-white p-3">
+        <input ref={imageInputRef} type="file" accept="image/*" onChange={chooseImage} className="hidden" />
+        {selectedImage && <div className="mb-3 flex items-center gap-3 rounded-xl bg-cream p-2">
+          <img src={previewUrl} alt="Pratinjau foto yang akan dikirim" className="h-14 w-14 rounded-lg object-cover" />
+          <p className="min-w-0 flex-1 truncate text-xs text-taupe">{selectedImage.name}</p>
+          <button type="button" onClick={() => setSelectedImage(null)} aria-label="Hapus foto pilihan" className="grid h-8 w-8 place-items-center rounded-lg text-taupe"><X size={16} /></button>
+        </div>}
         <div className="flex items-end gap-2">
+          <button type="button" onClick={() => imageInputRef.current?.click()} disabled={busy} aria-label="Tambah foto" title="Tambah foto" className="grid h-11 w-11 shrink-0 place-items-center rounded-2xl bg-cream text-taupe disabled:opacity-40"><ImagePlus size={18} /></button>
           <label htmlFor="couple-chat-message" className="sr-only">Tulis pesan</label>
           <textarea
             id="couple-chat-message"
@@ -708,10 +753,15 @@ function ChatView({ messages, user, partnerName, loading, onSend }) {
             placeholder="Tulis pesan..."
             className="max-h-28 min-h-11 flex-1 resize-y rounded-2xl border border-line bg-cream px-4 py-3 text-sm outline-none placeholder:text-taupe focus:border-rose-500/50"
           />
-          <button type="submit" disabled={busy || !draft.trim()} aria-label="Kirim pesan" className="grid h-11 w-11 shrink-0 place-items-center rounded-2xl bg-white text-black disabled:opacity-40"><Send size={17} /></button>
+          <button type="submit" disabled={busy || (!draft.trim() && !selectedImage)} aria-label={busy ? 'Mengirim pesan' : 'Kirim pesan'} className="grid h-11 w-11 shrink-0 place-items-center rounded-2xl bg-white text-black disabled:opacity-40">{busy ? <span className="h-4 w-4 animate-spin rounded-full border-2 border-zinc-400/40 border-t-zinc-900" /> : <Send size={17} />}</button>
         </div>
+        {busy && selectedImage && <p aria-live="polite" className="mt-2 text-center text-[11px] text-taupe">{uploadProgress ? `Mengirim foto · ${uploadProgress}%` : 'Mengoptimalkan foto...'}</p>}
         {error && <p role="alert" className="mt-2 text-xs text-rose-400">{error}</p>}
       </form>
+      {imageToView && <div className="fixed inset-0 z-[70] flex items-center justify-center bg-black/90 p-4" role="dialog" aria-modal="true" aria-label="Foto dalam pesan" onClick={() => setImageToView('')}>
+        <button type="button" onClick={() => setImageToView('')} aria-label="Tutup foto" className="absolute right-4 top-4 grid h-10 w-10 place-items-center rounded-full bg-white/10 text-white"><X size={20} /></button>
+        <img src={optimizedImage(imageToView)} alt="Foto dalam pesan" className="max-h-full max-w-full rounded-xl object-contain" onClick={event => event.stopPropagation()} />
+      </div>}
     </section>
   )
 }
@@ -725,6 +775,8 @@ function VideoCall({ user, couple }) {
   const peerConnectionRef = useRef(null)
   const localStreamRef = useRef(null)
   const callErrorTimerRef = useRef(null)
+  const iceRecoveryTimerRef = useRef(null)
+  const iceRestartInProgressRef = useRef(false)
   const readyRef = useRef(false)
   const signalHandlerRef = useRef(null)
   const callErrorHandlerRef = useRef(null)
@@ -743,6 +795,9 @@ function VideoCall({ user, couple }) {
   function releaseCall(message = '') {
     window.clearTimeout(callErrorTimerRef.current)
     callErrorTimerRef.current = null
+    window.clearTimeout(iceRecoveryTimerRef.current)
+    iceRecoveryTimerRef.current = null
+    iceRestartInProgressRef.current = false
     peerConnectionRef.current?.close()
     peerConnectionRef.current = null
     videoTransceiverRef.current = null
@@ -768,6 +823,8 @@ function VideoCall({ user, couple }) {
       displayMessage = 'Kamera tidak mendukung pengaturan yang diminta. Periksa perangkat lalu coba lagi.'
     } else if (name === 'OperationError' || /channel|realtime|sinyal/i.test(message)) {
       displayMessage = 'Gagal terhubung ke server sinyal. Periksa koneksi internet dan Realtime Supabase.'
+    } else if (name === 'NetworkError') {
+      displayMessage = 'Koneksi jaringan WebRTC gagal setelah mencoba menyambungkan ulang. Periksa jaringan atau server relay.'
     } else {
       displayMessage = message ? `Panggilan gagal (${name}): ${message}` : `Panggilan gagal (${name}). Coba lagi.`
     }
@@ -800,31 +857,77 @@ function VideoCall({ user, couple }) {
 
   const requestIceServers = useCallback(async () => {
     const iceServers = [{ urls: 'stun:stun.l.google.com:19302' }]
-    const turnUrls = String(import.meta.env.VITE_TURN_URL || '').split(',').map(url => url.trim()).filter(url => /^turns?:/i.test(url))
-    const turnUsername = String(import.meta.env.VITE_TURN_USERNAME || '').trim()
-    const turnCredential = String(import.meta.env.VITE_TURN_CREDENTIAL || '').trim()
-    if (turnUrls.length && turnUsername && turnCredential) {
-      iceServers.push({ urls: turnUrls, username: turnUsername, credential: turnCredential })
+    const appendIceServers = entries => {
+      if (!Array.isArray(entries)) return
+      entries.forEach(server => {
+        try {
+          if (!server || !(typeof server.urls === 'string' || Array.isArray(server.urls))) return
+          const urls = (Array.isArray(server.urls) ? server.urls : [server.urls])
+            .map(url => String(url).trim())
+            .filter(url => {
+              const match = url.match(/^(stun|stuns|turn|turns):(.+)$/i)
+              if (!match) return false
+              const address = match[2].replace(/^\/\//, '').split(/[?#]/)[0]
+              const parsed = new URL(`https://${address}`)
+              return Boolean(parsed.hostname) && parsed.pathname === '/' && !parsed.username && !parsed.password
+            })
+          if (!urls.length) return
+          if ((server.username != null && typeof server.username !== 'string')
+            || (server.credential != null && typeof server.credential !== 'string')) return
+          iceServers.push({
+            urls,
+            ...(server.username ? { username: server.username } : {}),
+            ...(server.credential ? { credential: server.credential } : {})
+          })
+        } catch (error) {
+          console.warn('FazaHub ignored an invalid ICE server entry.', error)
+        }
+      })
+    }
+    const relayNotice = () => iceServers.some(server => {
+      const urls = Array.isArray(server.urls) ? server.urls : [server.urls]
+      return urls.some(url => /^turns?:/i.test(url))
+    }) ? '' : 'Server relay tidak tersedia; mencoba koneksi langsung.'
+    const configuredTurnUrl = String(import.meta.env.VITE_TURN_URL || '').trim()
+    if (/^https:\/\//i.test(configuredTurnUrl)) {
+      try {
+        const apiUrl = new URL(configuredTurnUrl)
+        if (apiUrl.protocol !== 'https:') throw new Error('TURN credential endpoint must use HTTPS.')
+        const response = await fetch(apiUrl.href)
+        if (!response.ok) throw new Error(`TURN API returned HTTP ${response.status}.`)
+        const result = await response.json()
+        const providedServers = Array.isArray(result) ? result : result.iceServers
+        if (!Array.isArray(providedServers)) throw new Error('TURN API response does not contain an iceServers array.')
+        appendIceServers(providedServers)
+      } catch (error) {
+        console.warn('FazaHub configured TURN API unavailable; using remaining ICE servers.', error)
+      }
+    } else {
+      const turnUrls = configuredTurnUrl.split(',').map(url => url.trim()).filter(Boolean)
+      const turnUsername = String(import.meta.env.VITE_TURN_USERNAME || '').trim()
+      const turnCredential = String(import.meta.env.VITE_TURN_CREDENTIAL || '').trim()
+      if (turnUrls.length && turnUsername && turnCredential) appendIceServers([{ urls: turnUrls, username: turnUsername, credential: turnCredential }])
     }
 
     try {
       const { data: sessionData } = await supabase.auth.getSession()
       const accessToken = sessionData.session?.access_token
-      if (!accessToken) return { iceServers, notice: 'Server relay tidak tersedia; mencoba koneksi langsung.' }
+      if (!accessToken) return { iceServers, notice: relayNotice() }
 
       const response = await fetch('/api/turn-credentials', {
         method: 'POST',
         headers: { Authorization: `Bearer ${accessToken}` }
       })
-      if (!response.ok) return { iceServers, notice: 'Server relay tidak tersedia; mencoba koneksi langsung.' }
+      if (!response.ok) return { iceServers, notice: relayNotice() }
       const result = await response.json()
       if (!Array.isArray(result.iceServers) || !result.iceServers.length) {
-        return { iceServers, notice: 'Server relay tidak tersedia; mencoba koneksi langsung.' }
+        return { iceServers, notice: relayNotice() }
       }
-      return { iceServers: [...iceServers, ...result.iceServers], notice: '' }
+      appendIceServers(result.iceServers)
+      return { iceServers, notice: relayNotice() }
     } catch (error) {
       console.warn('FazaHub TURN credentials unavailable; using configured ICE servers.', error)
-      return { iceServers, notice: 'Server relay tidak tersedia; mencoba koneksi langsung.' }
+      return { iceServers, notice: relayNotice() }
     }
   }, [])
 
@@ -853,6 +956,28 @@ function VideoCall({ user, couple }) {
     if (!stream.getVideoTracks().length) peerConnection.addTransceiver('video', { direction: 'sendrecv' })
     videoTransceiverRef.current = peerConnection.getTransceivers()
       .find(transceiver => transceiver.receiver.track.kind === 'video') || null
+
+    const restartIce = async () => {
+      if (callRef.current.callId !== callId || peerConnectionRef.current !== peerConnection
+        || iceRestartInProgressRef.current) return
+      iceRestartInProgressRef.current = true
+      try {
+        peerConnection.restartIce()
+        const restartOffer = await peerConnection.createOffer({ iceRestart: true })
+        await peerConnection.setLocalDescription(restartOffer)
+        await sendSignal('ice-restart-offer', callId, peerConnection.localDescription.toJSON())
+        window.clearTimeout(iceRecoveryTimerRef.current)
+        iceRecoveryTimerRef.current = window.setTimeout(() => {
+          const state = peerConnection.iceConnectionState
+          if (peerConnectionRef.current === peerConnection && state !== 'connected' && state !== 'completed') {
+            callErrorHandlerRef.current?.(new DOMException(`ICE restart ended in ${state}.`, 'NetworkError'), callId)
+          }
+        }, 8000)
+      } catch (error) {
+        callErrorHandlerRef.current?.(error, callId)
+      }
+    }
+
     peerConnection.onicecandidate = event => {
       if (!event.candidate) return
       const current = callRef.current
@@ -866,6 +991,24 @@ function VideoCall({ user, couple }) {
         callErrorHandlerRef.current?.(error, callId)
       })
     }
+    peerConnection.oniceconnectionstatechange = () => {
+      const state = peerConnection.iceConnectionState
+      if (state === 'connected' || state === 'completed') {
+        window.clearTimeout(iceRecoveryTimerRef.current)
+        iceRecoveryTimerRef.current = null
+        iceRestartInProgressRef.current = false
+      } else if (state === 'disconnected') {
+        if (iceRecoveryTimerRef.current || iceRestartInProgressRef.current) return
+        iceRecoveryTimerRef.current = window.setTimeout(() => {
+          iceRecoveryTimerRef.current = null
+          if (peerConnection.iceConnectionState === 'disconnected') restartIce()
+        }, 8000)
+      } else if (state === 'failed') {
+        window.clearTimeout(iceRecoveryTimerRef.current)
+        iceRecoveryTimerRef.current = null
+        restartIce()
+      }
+    }
     peerConnection.ontrack = event => {
       const remoteStream = event.streams[0] || new MediaStream([event.track])
       updateCall(state => state.callId === callId ? { ...state, remoteStream } : state)
@@ -878,8 +1021,14 @@ function VideoCall({ user, couple }) {
     peerConnection.onconnectionstatechange = () => {
       if (peerConnection.connectionState === 'connected') {
         updateCall(state => state.callId === callId ? { ...state, phase: 'active', error: '' } : state)
-      } else if (peerConnection.connectionState === 'failed') {
-        callErrorHandlerRef.current?.(new Error('Koneksi video gagal. Periksa jaringan, kamera, atau server relay.'), callId)
+      } else if (peerConnection.connectionState === 'failed'
+        && peerConnection.iceConnectionState !== 'failed'
+        && peerConnection.iceConnectionState !== 'disconnected'
+        && !iceRecoveryTimerRef.current) {
+        iceRecoveryTimerRef.current = window.setTimeout(() => {
+          iceRecoveryTimerRef.current = null
+          if (peerConnection.connectionState === 'failed') restartIce()
+        }, 8000)
       }
     }
     return peerConnection
@@ -931,8 +1080,26 @@ function VideoCall({ user, couple }) {
       await current.peerConnection.setRemoteDescription(new RTCSessionDescription(signal.data))
       await flushRemoteCandidates(current.peerConnection)
       updateCall(state => ({ ...state, phase: 'connecting' }))
+    } else if (signal.kind === 'ice-restart-offer' && current.peerConnection) {
+      const peerConnection = current.peerConnection
+      const offerCollision = peerConnection.signalingState !== 'stable'
+      const polite = user.id > partnerId
+      if (offerCollision && !polite) return
+      if (offerCollision) await peerConnection.setLocalDescription({ type: 'rollback' })
+      await peerConnection.setRemoteDescription(new RTCSessionDescription(signal.data))
+      await flushRemoteCandidates(peerConnection)
+      const answer = await peerConnection.createAnswer()
+      await peerConnection.setLocalDescription(answer)
+      await sendSignal('ice-restart-answer', signal.callId, peerConnection.localDescription.toJSON())
+    } else if (signal.kind === 'ice-restart-answer' && current.peerConnection) {
+      await current.peerConnection.setRemoteDescription(new RTCSessionDescription(signal.data))
+      await flushRemoteCandidates(current.peerConnection)
+      iceRestartInProgressRef.current = false
     } else if (signal.kind === 'candidate' && signal.data) {
-      if (current.peerConnection?.remoteDescription) {
+      const remoteDescription = current.peerConnection?.remoteDescription
+      const remoteUfrags = remoteDescription?.sdp.match(/^a=ice-ufrag:(.+)$/gm)?.map(line => line.slice('a=ice-ufrag:'.length)) || []
+      const candidateMatchesRemote = !signal.data.usernameFragment || remoteUfrags.includes(signal.data.usernameFragment)
+      if (remoteDescription && candidateMatchesRemote) {
         await current.peerConnection.addIceCandidate(new RTCIceCandidate(signal.data))
       } else {
         updateCall(state => ({ ...state, pendingRemoteCandidates: [...(state.pendingRemoteCandidates || []), signal.data] }))
@@ -977,6 +1144,9 @@ function VideoCall({ user, couple }) {
       readyRef.current = false
       channelRef.current = null
       window.clearTimeout(callErrorTimerRef.current)
+      window.clearTimeout(iceRecoveryTimerRef.current)
+      iceRecoveryTimerRef.current = null
+      iceRestartInProgressRef.current = false
       peerConnectionRef.current?.close()
       peerConnectionRef.current = null
       videoTransceiverRef.current = null
@@ -1264,7 +1434,7 @@ function AppShell({ user, couple, theme, onThemeChange, onSignOut, onLeaveRoom }
     let offset = 0
     while (true) {
       const { data, error: loadError } = await supabase.from('couple_messages')
-        .select('id,couple_id,user_id,body,created_at')
+        .select('id,couple_id,user_id,body,image_url,created_at')
         .eq('couple_id', couple.id)
         .order('created_at', { ascending: true })
         .range(offset, offset + pageSize - 1)
@@ -1304,10 +1474,10 @@ function AppShell({ user, couple, theme, onThemeChange, onSignOut, onLeaveRoom }
       : [...current, data].sort((a, b) => new Date(a.created_at) - new Date(b.created_at)))
   }
 
-  async function sendMessage(body) {
+  async function sendMessage(body, imageUrl = null) {
     const { data, error: insertError } = await supabase.from('couple_messages')
-      .insert({ couple_id: couple.id, user_id: user.id, body })
-      .select('id,couple_id,user_id,body,created_at')
+      .insert({ couple_id: couple.id, user_id: user.id, body, image_url: imageUrl })
+      .select('id,couple_id,user_id,body,image_url,created_at')
       .single()
     if (insertError) throw insertError
     setMessages(current => current.some(message => message.id === data.id)

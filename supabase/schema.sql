@@ -41,9 +41,18 @@ create table if not exists public.couple_messages (
   id uuid primary key default gen_random_uuid(),
   couple_id uuid references public.couples(id) on delete cascade not null,
   user_id uuid references auth.users(id) on delete cascade not null,
-  body varchar(2000) not null check (length(trim(body)) between 1 and 2000),
+  body varchar(2000) not null check (length(trim(body)) between 0 and 2000),
+  image_url text,
   created_at timestamptz not null default now()
 );
+
+alter table public.couple_messages add column if not exists image_url text;
+alter table public.couple_messages drop constraint if exists couple_messages_body_check;
+alter table public.couple_messages add constraint couple_messages_body_check
+  check (length(trim(body)) between 0 and 2000);
+alter table public.couple_messages drop constraint if exists couple_messages_content_present;
+alter table public.couple_messages add constraint couple_messages_content_present
+  check (length(trim(body)) > 0 or image_url is not null);
 
 create index if not exists idx_daily_snaps_couple_date
   on public.daily_snaps (couple_id, snap_date, created_at desc);
