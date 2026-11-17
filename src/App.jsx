@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
   ArrowRight, Bell, CalendarDays, Camera, Check, ChevronLeft, ChevronRight,
-  Download, Heart, ImagePlus, LogOut, Plus, Settings, Sparkles, Trash2, Upload, X
+  Download, Heart, ImagePlus, LogOut, MessageCircle, MessageSquare, Plus, Send, Settings, Sparkles, Trash2, Upload, X
 } from 'lucide-react'
 import { isSupabaseConfigured, supabase } from './lib/supabase'
 import { uploadImage, optimizedImage } from './lib/cloudinary'
@@ -199,30 +199,74 @@ function CoupleSetup({ user, onComplete, onSignOut }) {
   )
 }
 
-function SnapCard({ snap, partnerName, canDelete = false, onDelete }) {
+function SnapCard({ snap, partnerName, canDelete = false, onDelete, comments = [], commentsLoading = false, userId, onAddComment }) {
   const mood = moods.find(item => item.label === snap.mood)
   const author = partnerName(snap.user_id)
   return (
-    <article className="relative isolate aspect-[4/5] overflow-hidden rounded-2xl border border-white/10 bg-[#121215] animate-rise-in">
-      <img src={optimizedImage(snap.image_url)} alt={snap.note || `Kenangan ${dateLabel(snap.snap_date)}`} className="absolute inset-0 h-full w-full object-cover" loading="lazy" />
-      <div className="absolute inset-0 bg-gradient-to-t from-black/85 via-black/10 to-black/20" />
-      {mood && <span className="absolute left-3 top-3 rounded-full border border-white/15 bg-black/35 px-3 py-1.5 text-xs font-semibold text-white backdrop-blur-md">{mood.emoji} {mood.label}</span>}
-      {canDelete && <button type="button" onClick={() => onDelete(snap)} aria-label="Hapus foto ini" className="absolute right-3 top-3 grid h-9 w-9 place-items-center rounded-full border border-white/15 bg-black/35 text-white backdrop-blur-md"><Trash2 size={16} /></button>}
-      <div className="absolute inset-x-0 bottom-0 p-4 text-white sm:p-5">
-        <div className="flex items-end justify-between gap-3">
-          <div className="min-w-0">
-            <p className="truncate text-base font-bold tracking-tight">{author}</p>
-            <p className="mt-1 font-mono text-xs tracking-wide text-white/75">{new Intl.DateTimeFormat('id-ID', { hour: '2-digit', minute: '2-digit' }).format(new Date(snap.created_at))} <span className="mx-1">·</span> {dateLabel(snap.snap_date, { day: 'numeric', month: 'short' })}</p>
+    <article className="overflow-hidden rounded-2xl border border-white/10 bg-[#121215] animate-rise-in">
+      <div className="relative isolate aspect-[4/5]">
+        <img src={optimizedImage(snap.image_url)} alt={snap.note || `Kenangan ${dateLabel(snap.snap_date)}`} className="absolute inset-0 h-full w-full object-cover" loading="lazy" />
+        <div className="absolute inset-0 bg-gradient-to-t from-black/85 via-black/10 to-black/20" />
+        {mood && <span className="absolute left-3 top-3 rounded-full border border-white/15 bg-black/35 px-3 py-1.5 text-xs font-semibold text-white backdrop-blur-md">{mood.emoji} {mood.label}</span>}
+        {canDelete && <button type="button" onClick={() => onDelete(snap)} aria-label="Hapus foto ini" className="absolute right-3 top-3 grid h-9 w-9 place-items-center rounded-full border border-white/15 bg-black/35 text-white backdrop-blur-md"><Trash2 size={16} /></button>}
+        <div className="absolute inset-x-0 bottom-0 p-4 text-white sm:p-5">
+          <div className="flex items-end justify-between gap-3">
+            <div className="min-w-0">
+              <p className="truncate text-base font-bold tracking-tight">{author}</p>
+              <p className="mt-1 font-mono text-xs tracking-wide text-white/75">{new Intl.DateTimeFormat('id-ID', { hour: '2-digit', minute: '2-digit' }).format(new Date(snap.created_at))} <span className="mx-1">·</span> {dateLabel(snap.snap_date, { day: 'numeric', month: 'short' })}</p>
+            </div>
+            <span className="shrink-0 rounded-full border border-white/15 bg-black/25 px-2.5 py-1 text-[10px] font-semibold uppercase tracking-wider text-white/80">FazaHub</span>
           </div>
-          <span className="shrink-0 rounded-full border border-white/15 bg-black/25 px-2.5 py-1 text-[10px] font-semibold uppercase tracking-wider text-white/80">FazaHub</span>
+          {snap.note && <p className="mt-3 line-clamp-3 whitespace-pre-wrap text-sm leading-5 text-white/90">{snap.note}</p>}
         </div>
-        {snap.note && <p className="mt-3 line-clamp-3 whitespace-pre-wrap text-sm leading-5 text-white/90">{snap.note}</p>}
       </div>
+      <CommentThread snapId={snap.id} comments={comments} loading={commentsLoading} userId={userId} partnerName={partnerName} onAddComment={onAddComment} />
     </article>
   )
 }
 
-function FeedView({ snaps, partnerName, userId, onAdd, loading, streak, todayUserCount, reminderDue, onDelete }) {
+function CommentThread({ snapId, comments, loading, userId, partnerName, onAddComment }) {
+  const [draft, setDraft] = useState('')
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState('')
+
+  async function submit(event) {
+    event.preventDefault()
+    const body = draft.trim()
+    if (!body || busy) return
+    setBusy(true)
+    setError('')
+    try {
+      await onAddComment(snapId, body)
+      setDraft('')
+    } catch (submitError) {
+      setError(submitError.message || 'Komentar gagal dikirim. Coba lagi.')
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  return (
+    <div className="space-y-3 p-4">
+      {comments.length > 0 && <div className="space-y-2.5">
+        {comments.map(comment => <div key={comment.id} className="flex items-start gap-2.5 text-xs leading-5">
+          <span className={`mt-0.5 grid h-6 w-6 shrink-0 place-items-center rounded-full text-[9px] font-bold ${comment.user_id === userId ? 'bg-rose-500/15 text-rose-400' : 'bg-white/10 text-zinc-300'}`}>{partnerName(comment.user_id).slice(0, 1).toUpperCase()}</span>
+          <p className="min-w-0 flex-1"><span className="mr-1.5 font-bold text-charcoal">{partnerName(comment.user_id)}</span><span className="whitespace-pre-wrap text-taupe">{comment.body}</span></p>
+          <time className="shrink-0 font-mono text-[9px] text-taupe">{new Intl.DateTimeFormat('id-ID', { hour: '2-digit', minute: '2-digit' }).format(new Date(comment.created_at))}</time>
+        </div>)}
+      </div>}
+      {loading && comments.length === 0 && <p className="text-[11px] text-taupe">Memuat komentar...</p>}
+      <form onSubmit={submit} className="flex items-center gap-2">
+        <label className="sr-only" htmlFor={`comment-${snapId}`}>Tulis komentar</label>
+        <input id={`comment-${snapId}`} value={draft} onChange={event => setDraft(event.target.value)} maxLength={500} placeholder="Tulis komentar..." className="min-w-0 flex-1 rounded-full border border-line bg-cream px-4 py-2.5 text-xs outline-none placeholder:text-taupe focus:border-rose-500/50" />
+        <button type="submit" disabled={busy || !draft.trim()} aria-label="Kirim komentar" className="grid h-9 w-9 shrink-0 place-items-center rounded-full bg-white text-black disabled:opacity-40"><Send size={15} /></button>
+      </form>
+      {error && <p role="alert" className="text-[11px] text-rose-400">{error}</p>}
+    </div>
+  )
+}
+
+function FeedView({ snaps, partnerName, userId, commentsBySnap, commentsLoading, onAddComment, onAdd, loading, streak, todayUserCount, reminderDue, onDelete }) {
   return (
     <div className="pb-6">
       <div className="mb-6">
@@ -236,7 +280,7 @@ function FeedView({ snaps, partnerName, userId, onAdd, loading, streak, todayUse
       {reminderDue && <div className="mb-4 rounded-2xl border border-white/10 bg-white/5 px-4 py-3 text-sm text-white/80">Hari ini masih punya satu ruang untuk disimpan.</div>}
       {loading ? <Loading /> : snaps.length === 0
         ? <EmptyState onAdd={onAdd} />
-        : <div className="space-y-4">{snaps.map(snap => <SnapCard key={snap.id} snap={snap} partnerName={partnerName} canDelete={snap.user_id === userId} onDelete={onDelete} />)}</div>}
+        : <div className="space-y-4">{snaps.map(snap => <SnapCard key={snap.id} snap={snap} partnerName={partnerName} canDelete={snap.user_id === userId} onDelete={onDelete} comments={commentsBySnap[snap.id] || []} commentsLoading={commentsLoading} userId={userId} onAddComment={onAddComment} />)}</div>}
       <Button onClick={onAdd} className="fixed bottom-24 right-[max(calc((100vw-26rem)/2+1rem),1rem)] z-20 h-14 w-14 rounded-full bg-white text-black shadow-xl" aria-label="Tambah foto"><Plus size={23} /></Button>
     </div>
   )
@@ -559,11 +603,89 @@ function AddSnapModal({ userId, coupleId, onClose, onSaved }) {
   )
 }
 
-const tabFromHash = hash => hash === '#calendar' ? 'calendar' : hash === '#space' ? 'space' : 'feed'
+function ChatView({ messages, user, partnerName, loading, onSend }) {
+  const [draft, setDraft] = useState('')
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState('')
+  const bottomRef = useRef(null)
+
+  useEffect(() => {
+    bottomRef.current?.scrollIntoView({ behavior: 'smooth', block: 'end' })
+  }, [messages])
+
+  async function submit(event) {
+    event.preventDefault()
+    const body = draft.trim()
+    if (!body || busy) return
+    setBusy(true)
+    setError('')
+    try {
+      await onSend(body)
+      setDraft('')
+    } catch (sendError) {
+      setError(sendError.message || 'Pesan gagal dikirim. Coba lagi.')
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  return (
+    <section className="flex h-[calc(100dvh-13rem)] min-h-[360px] max-h-[720px] flex-col overflow-hidden rounded-3xl border border-line bg-white">
+      <header className="border-b border-line px-4 py-4">
+        <p className="text-xs font-bold uppercase tracking-[.16em] text-terracotta">Percakapan privat</p>
+        <h1 className="mt-1 text-xl font-extrabold">Pesan berdua</h1>
+        <p className="mt-1 text-[11px] text-taupe">Hanya kamu dan pasanganmu yang dapat melihat percakapan ini.</p>
+      </header>
+      <div aria-live="polite" className="chat-scroll-area flex-1 space-y-3 overflow-y-auto px-4 py-4">
+        {loading ? <Loading /> : messages.length === 0
+          ? <div className="grid h-full place-items-center text-center"><div><span className="mx-auto grid h-12 w-12 place-items-center rounded-full bg-white text-taupe"><MessageCircle size={21} /></span><p className="mt-3 text-sm font-bold">Mulai obrolan kalian</p><p className="mt-1 text-xs text-taupe">Kirim pesan pertama, atau ceritakan foto hari ini.</p></div></div>
+          : messages.map(message => {
+            const mine = message.user_id === user.id
+            return <div key={message.id} className={`flex ${mine ? 'justify-end' : 'justify-start'}`}>
+              <article className={`max-w-[84%] rounded-2xl px-3.5 py-2.5 ${mine ? 'rounded-br-sm bg-white text-black' : 'rounded-bl-sm bg-[#25252B] text-zinc-100'}`}>
+                {!mine && <p className="mb-1 text-[10px] font-bold text-rose-400">{partnerName(message.user_id)}</p>}
+                <p className="whitespace-pre-wrap break-words text-sm leading-5">{message.body}</p>
+                <time className={`mt-1 block text-right font-mono text-[9px] ${mine ? 'text-zinc-500' : 'text-zinc-400'}`}>{new Intl.DateTimeFormat('id-ID', { hour: '2-digit', minute: '2-digit' }).format(new Date(message.created_at))}</time>
+              </article>
+            </div>
+          })}
+        <div ref={bottomRef} />
+      </div>
+      <form onSubmit={submit} className="border-t border-line bg-white p-3">
+        <div className="flex items-end gap-2">
+          <label htmlFor="couple-chat-message" className="sr-only">Tulis pesan</label>
+          <textarea
+            id="couple-chat-message"
+            value={draft}
+            onChange={event => setDraft(event.target.value)}
+            onKeyDown={event => {
+              if (event.key === 'Enter' && !event.shiftKey && !event.nativeEvent.isComposing) {
+                event.preventDefault()
+                event.currentTarget.form?.requestSubmit()
+              }
+            }}
+            maxLength={2000}
+            rows={1}
+            placeholder="Tulis pesan..."
+            className="max-h-28 min-h-11 flex-1 resize-y rounded-2xl border border-line bg-cream px-4 py-3 text-sm outline-none placeholder:text-taupe focus:border-rose-500/50"
+          />
+          <button type="submit" disabled={busy || !draft.trim()} aria-label="Kirim pesan" className="grid h-11 w-11 shrink-0 place-items-center rounded-2xl bg-white text-black disabled:opacity-40"><Send size={17} /></button>
+        </div>
+        {error && <p role="alert" className="mt-2 text-xs text-rose-400">{error}</p>}
+      </form>
+    </section>
+  )
+}
+
+const tabFromHash = hash => hash === '#calendar' ? 'calendar' : hash === '#space' ? 'space' : hash === '#chat' ? 'chat' : 'feed'
 
 function AppShell({ user, couple, theme, onThemeChange, onSignOut, onLeaveRoom }) {
   const [snaps, setSnaps] = useState([])
+  const [comments, setComments] = useState([])
+  const [messages, setMessages] = useState([])
   const [loading, setLoading] = useState(true)
+  const [commentsLoading, setCommentsLoading] = useState(true)
+  const [messagesLoading, setMessagesLoading] = useState(true)
   const [error, setError] = useState('')
   const [reminderDue, setReminderDue] = useState(false)
   const [route, setRoute] = useState(() => {
@@ -612,6 +734,74 @@ function AppShell({ user, couple, theme, onThemeChange, onSignOut, onLeaveRoom }
     setLoading(false)
   }, [couple.id])
 
+  const loadComments = useCallback(async () => {
+    const pageSize = 1000
+    const entries = []
+    let offset = 0
+    while (true) {
+      const { data, error: loadError } = await supabase.from('snap_comments')
+        .select('id,snap_id,couple_id,user_id,body,created_at')
+        .eq('couple_id', couple.id)
+        .order('created_at', { ascending: true })
+        .range(offset, offset + pageSize - 1)
+      if (loadError) {
+        setError(`Komentar belum bisa dimuat: ${loadError.message}`)
+        setCommentsLoading(false)
+        return
+      }
+      entries.push(...(data || []))
+      if (!data || data.length < pageSize) break
+      offset += pageSize
+    }
+    setComments(entries)
+    setCommentsLoading(false)
+  }, [couple.id])
+
+  const loadMessages = useCallback(async () => {
+    const pageSize = 1000
+    const entries = []
+    let offset = 0
+    while (true) {
+      const { data, error: loadError } = await supabase.from('couple_messages')
+        .select('id,couple_id,user_id,body,created_at')
+        .eq('couple_id', couple.id)
+        .order('created_at', { ascending: true })
+        .range(offset, offset + pageSize - 1)
+      if (loadError) {
+        setError(`Pesan belum bisa dimuat: ${loadError.message}`)
+        setMessagesLoading(false)
+        return
+      }
+      entries.push(...(data || []))
+      if (!data || data.length < pageSize) break
+      offset += pageSize
+    }
+    setMessages(entries)
+    setMessagesLoading(false)
+  }, [couple.id])
+
+  async function addComment(snapId, body) {
+    const { data, error: insertError } = await supabase.from('snap_comments')
+      .insert({ snap_id: snapId, couple_id: couple.id, user_id: user.id, body })
+      .select('id,snap_id,couple_id,user_id,body,created_at')
+      .single()
+    if (insertError) throw insertError
+    setComments(current => current.some(comment => comment.id === data.id)
+      ? current
+      : [...current, data].sort((a, b) => new Date(a.created_at) - new Date(b.created_at)))
+  }
+
+  async function sendMessage(body) {
+    const { data, error: insertError } = await supabase.from('couple_messages')
+      .insert({ couple_id: couple.id, user_id: user.id, body })
+      .select('id,couple_id,user_id,body,created_at')
+      .single()
+    if (insertError) throw insertError
+    setMessages(current => current.some(message => message.id === data.id)
+      ? current
+      : [...current, data].sort((a, b) => new Date(a.created_at) - new Date(b.created_at)))
+  }
+
   useEffect(() => {
     const initialRoute = { tab: tabFromHash(window.location.hash), overlay: null, date: null }
     window.history.replaceState({ fazahub: true, ...initialRoute }, '', `#${initialRoute.tab === 'space' ? 'space' : initialRoute.tab}`)
@@ -644,11 +834,15 @@ function AppShell({ user, couple, theme, onThemeChange, onSignOut, onLeaveRoom }
 
   useEffect(() => {
     loadSnaps()
+    loadComments()
+    loadMessages()
     const channel = supabase.channel(`couple-snaps-${couple.id}`)
       .on('postgres_changes', { event: '*', schema: 'public', table: 'daily_snaps', filter: `couple_id=eq.${couple.id}` }, loadSnaps)
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'snap_comments', filter: `couple_id=eq.${couple.id}` }, loadComments)
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'couple_messages', filter: `couple_id=eq.${couple.id}` }, loadMessages)
       .subscribe()
     return () => { supabase.removeChannel(channel) }
-  }, [couple.id, loadSnaps])
+  }, [couple.id, loadComments, loadMessages, loadSnaps])
 
   const todaySnaps = useMemo(() => snaps.filter(snap => snap.snap_date === today), [snaps, today])
   const todayUserCount = todaySnaps.filter(snap => snap.user_id === user.id).length
@@ -711,7 +905,10 @@ function AppShell({ user, couple, theme, onThemeChange, onSignOut, onLeaveRoom }
       .eq('id', snap.id)
       .eq('user_id', user.id)
     if (deleteError) setError(deleteError.message)
-    else setSnaps(current => current.filter(item => item.id !== snap.id))
+    else {
+      setSnaps(current => current.filter(item => item.id !== snap.id))
+      setComments(current => current.filter(comment => comment.snap_id !== snap.id))
+    }
   }
 
   async function confirmLeaveRoom() {
@@ -723,8 +920,13 @@ function AppShell({ user, couple, theme, onThemeChange, onSignOut, onLeaveRoom }
   const tabs = [
     { id: 'feed', label: 'Beranda', icon: Heart },
     { id: 'calendar', label: 'Kalender', icon: CalendarDays },
+    { id: 'chat', label: 'Pesan', icon: MessageCircle },
     { id: 'space', label: 'Ruang kita', icon: Settings }
   ]
+  const commentsBySnap = useMemo(() => comments.reduce((grouped, comment) => {
+    grouped[comment.snap_id] = [...(grouped[comment.snap_id] || []), comment]
+    return grouped
+  }, {}), [comments])
   const selectedSnaps = route.date ? snaps.filter(snap => snap.snap_date === route.date) : []
 
   return (
@@ -745,6 +947,9 @@ function AppShell({ user, couple, theme, onThemeChange, onSignOut, onLeaveRoom }
             snaps={todaySnaps}
             partnerName={partnerName}
             userId={user.id}
+            commentsBySnap={commentsBySnap}
+            commentsLoading={commentsLoading}
+            onAddComment={addComment}
             onAdd={openUpload}
             onDelete={deleteSnap}
             loading={loading}
@@ -753,6 +958,7 @@ function AppShell({ user, couple, theme, onThemeChange, onSignOut, onLeaveRoom }
             reminderDue={reminderDue}
           />}
           {route.tab === 'calendar' && <CalendarView snaps={snaps} onSelectDate={date => pushRoute({ tab: 'calendar', overlay: 'day', date })} />}
+          {route.tab === 'chat' && <ChatView messages={messages} user={user} partnerName={partnerName} loading={messagesLoading} onSend={sendMessage} />}
           {route.tab === 'space' && <SettingsView
             couple={couple}
             user={user}
@@ -789,7 +995,7 @@ function AppShell({ user, couple, theme, onThemeChange, onSignOut, onLeaveRoom }
             <div><p className="text-xs font-bold uppercase tracking-widest text-terracotta">Kenangan</p><h2 id="memory-date" className="mt-1 text-xl font-extrabold">{dateLabel(route.date)}</h2></div>
             <Button onClick={closeOverlay} className="h-10 w-10 rounded-xl bg-white text-taupe" aria-label="Tutup galeri"><X size={18} /></Button>
           </div>
-          <div className="space-y-4">{selectedSnaps.map(snap => <SnapCard key={snap.id} snap={snap} partnerName={partnerName} canDelete={snap.user_id === user.id} onDelete={deleteSnap} />)}</div>
+          <div className="space-y-4">{selectedSnaps.map(snap => <SnapCard key={snap.id} snap={snap} partnerName={partnerName} canDelete={snap.user_id === user.id} onDelete={deleteSnap} comments={commentsBySnap[snap.id] || []} commentsLoading={commentsLoading} userId={user.id} onAddComment={addComment} />)}</div>
         </section>
       </div>}
     </div>

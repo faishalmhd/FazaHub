@@ -36,9 +36,11 @@ button, input, textarea { font: inherit; }
 button { -webkit-tap-highlight-color: transparent; }
 ::selection { background: #F43F5E; color: #fff; }
 code, .font-mono { font-family: 'JetBrains Mono', monospace; }
+.chat-scroll-area { background: color-mix(in srgb, var(--app-bg) 58%, var(--app-surface)); }
 
 [data-theme='dark'] .bg-cream { background-color: var(--app-bg) !important; }
 [data-theme='dark'] .bg-white { background-color: var(--app-surface) !important; }
+[data-theme='dark'] .bg-white.text-black { background-color: #FAFAFA !important; color: #09090B !important; }
 [data-theme='dark'] .text-charcoal { color: var(--app-text) !important; }
 [data-theme='dark'] .text-taupe { color: var(--app-muted) !important; }
 [data-theme='dark'] .border-line { border-color: var(--app-border) !important; }

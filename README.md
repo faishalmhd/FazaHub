@@ -24,6 +24,7 @@ Impor repository ke Vercel dengan preset **Vite**, build command `npm run build`
 ## Fitur
 
 - Feed jurnal harian, kalender dengan thumbnail, Realtime, badge streak, dan penghapusan foto milik sendiri.
+- Komentar pada setiap foto dan chat realtime privat untuk dua anggota ruang. Terapkan [`supabase/migrations/20261117200000_comments_and_couple_chat.sql`](./supabase/migrations/20261117200000_comments_and_couple_chat.sql) di SQL Editor pada project yang sudah berjalan; foto dan akun lama tidak dihapus.
 - Upload galeri dan kamera melalui tombol terpisah. Foto diorientasikan dan di-resize maksimal 1600 px, lalu dikompres sebagai JPEG kualitas 0.85 sebelum diunggah.
 - Ekspor ZIP foto teroptimasi dengan `metadata.json` berisi tanggal, mood, catatan, dan nama pengirim.
 - Tema gelap editorial sebagai default, dengan pilihan tema terang.
