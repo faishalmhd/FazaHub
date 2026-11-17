@@ -1,9 +1,11 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
-  ArrowLeft, ArrowRight, CalendarDays, Camera, Check, ChevronLeft, ChevronRight,
-  Heart, ImagePlus, LogOut, Plus, Settings, Sparkles, Upload, X
+  ArrowLeft, ArrowRight, Bell, BellOff, CalendarDays, Camera, Check, ChevronLeft, ChevronRight,
+  Download, Heart, ImagePlus, LogOut, Plus, Settings, Sparkles, Upload, X
 } from 'lucide-react'
 import { isSupabaseConfigured, supabase } from './lib/supabase'
+import { exportJournal } from './lib/exportJournal'
+import { decodeVapidPublicKey, getPushRegistration } from './lib/webPush'
 
 const moods = [
   { label: 'Bahagia', emoji: '😊' },
@@ -290,11 +292,123 @@ function CalendarView({ snaps, onSelectDate }) {
   )
 }
 
-function SettingsView({ couple, user, partnerName, onSignOut }) {
+function SettingsView({ couple, user, partnerName, snaps, onSignOut }) {
   const [copied, setCopied] = useState(false)
+  const [reminderEnabled, setReminderEnabled] = useState(false)
+  const [reminderLoading, setReminderLoading] = useState(true)
+  const [reminderBusy, setReminderBusy] = useState(false)
+  const [reminderMessage, setReminderMessage] = useState('')
+  const [reminderError, setReminderError] = useState('')
+  const [exportBusy, setExportBusy] = useState(false)
+  const [exportProgress, setExportProgress] = useState({ done: 0, total: 0 })
+  const [exportError, setExportError] = useState('')
   const isPartner1 = couple.partner_1_id === user.id
   const myName = isPartner1 ? couple.partner_1_name : couple.partner_2_name
   const otherName = isPartner1 ? couple.partner_2_name : couple.partner_1_name
+  const vapidPublicKey = import.meta.env.VITE_VAPID_PUBLIC_KEY
+
+  useEffect(() => {
+    let active = true
+    async function checkSubscription() {
+      try {
+        if (!vapidPublicKey) return
+        const registration = await getPushRegistration()
+        const subscription = await registration.pushManager.getSubscription()
+        if (!subscription) return
+        const { data, error } = await supabase.from('push_subscriptions')
+          .select('id')
+          .eq('user_id', user.id)
+          .eq('endpoint', subscription.endpoint)
+          .maybeSingle()
+        if (error) throw error
+        if (active) setReminderEnabled(Boolean(data))
+      } catch (error) {
+        if (active) setReminderError(error.message || 'Status pengingat gagal diperiksa.')
+      } finally {
+        if (active) setReminderLoading(false)
+      }
+    }
+    checkSubscription()
+    return () => { active = false }
+  }, [user.id, vapidPublicKey])
+
+  async function toggleReminder() {
+    setReminderBusy(true)
+    setReminderError('')
+    setReminderMessage('')
+    try {
+      if (!vapidPublicKey) throw new Error('Push belum dikonfigurasi. Tambahkan VITE_VAPID_PUBLIC_KEY dan deploy fungsi pengingat Supabase.')
+      const registration = await getPushRegistration()
+      let subscription = await registration.pushManager.getSubscription()
+
+      if (reminderEnabled) {
+        const endpoint = subscription?.endpoint
+        let unsubscribeError
+        if (subscription) {
+          try {
+            await subscription.unsubscribe()
+          } catch (error) {
+            unsubscribeError = error
+          }
+        }
+        if (endpoint) {
+          const { error } = await supabase.from('push_subscriptions').delete()
+            .eq('user_id', user.id)
+            .eq('endpoint', endpoint)
+          if (error) throw error
+        }
+        setReminderEnabled(false)
+        if (unsubscribeError) throw new Error('Pengingat dinonaktifkan di server, tetapi browser belum menghapus langganannya. Coba aktifkan lalu nonaktifkan lagi.')
+        setReminderMessage('Pengingat harian dinonaktifkan.')
+        return
+      }
+
+      const permission = await Notification.requestPermission()
+      if (permission !== 'granted') throw new Error('Izin notifikasi belum diberikan. Aktifkan notifikasi FazaHub di pengaturan browser.')
+      let createdSubscription = false
+      if (!subscription) {
+        subscription = await registration.pushManager.subscribe({
+          userVisibleOnly: true,
+          applicationServerKey: decodeVapidPublicKey(vapidPublicKey)
+        })
+        createdSubscription = true
+      }
+      const timezone = Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC'
+      const { error } = await supabase.from('push_subscriptions').upsert({
+        user_id: user.id,
+        couple_id: couple.id,
+        endpoint: subscription.endpoint,
+        subscription: subscription.toJSON(),
+        timezone,
+        reminder_time: '20:00:00',
+        updated_at: new Date().toISOString()
+      }, { onConflict: 'endpoint' })
+      if (error) {
+        if (createdSubscription) await subscription.unsubscribe()
+        throw error
+      }
+      setReminderEnabled(true)
+      setReminderMessage('Pengingat aktif setiap hari pukul 20.00 waktu lokal, kecuali jika salah satu dari kalian sudah menyimpan foto hari itu.')
+    } catch (error) {
+      setReminderError(error.message || 'Pengaturan pengingat gagal. Coba lagi.')
+    } finally {
+      setReminderBusy(false)
+    }
+  }
+
+  async function downloadJournal() {
+    setExportBusy(true)
+    setExportProgress({ done: 0, total: snaps.length })
+    setExportError('')
+    try {
+      await exportJournal(snaps, partnerName, (done, total) => setExportProgress({ done, total }))
+    } catch (error) {
+      setExportError(error.message || 'Ekspor jurnal gagal. Coba lagi.')
+    } finally {
+      setExportBusy(false)
+    }
+  }
+
   async function copyCode() {
     try {
       await navigator.clipboard.writeText(couple.invite_code)
@@ -324,6 +438,31 @@ function SettingsView({ couple, user, partnerName, onSignOut }) {
       <div className="mt-4 rounded-[1.75rem] border border-line bg-white p-5 shadow-soft">
         <p className="text-xs font-bold uppercase tracking-[.12em] text-taupe">Akun</p>
         <div className="mt-4 flex items-center justify-between gap-3"><span className="text-sm font-semibold">Email</span><span className="truncate text-sm text-taupe">{user.email}</span></div>
+      </div>
+      <div className="mt-4 rounded-[1.75rem] border border-line bg-white p-5 shadow-soft">
+        <div className="flex items-start gap-3">
+          <div className="grid h-10 w-10 shrink-0 place-items-center rounded-xl bg-[#FFF0EC] text-terracotta"><Bell size={19} /></div>
+          <div className="min-w-0 flex-1">
+            <p className="text-sm font-extrabold">Pengingat harian</p>
+            <p className="mt-1 text-xs leading-5 text-taupe">Pukul 20.00 waktu lokal. Kami mengingatkan hanya jika belum ada foto hari ini.</p>
+          </div>
+        </div>
+        <Button onClick={toggleReminder} disabled={reminderBusy || reminderLoading} className={`mt-4 w-full px-4 py-3 text-sm ${reminderEnabled ? 'border border-line bg-white text-charcoal' : 'bg-terracotta text-white'}`}>
+          {reminderBusy || reminderLoading ? 'Memeriksa...' : reminderEnabled ? <><BellOff size={16} /> Matikan pengingat</> : <><Bell size={16} /> Aktifkan pengingat</>}
+        </Button>
+        {!vapidPublicKey && <p className="mt-3 text-xs leading-5 text-taupe">Pengingat push perlu VAPID key dan Edge Function Supabase. Lihat langkah konfigurasi di README.</p>}
+        {reminderMessage && <p role="status" className="mt-3 text-xs leading-5 text-[#47785A]">{reminderMessage}</p>}
+        {reminderError && <p role="alert" className="mt-3 text-xs leading-5 text-[#A54D37]">{reminderError}</p>}
+      </div>
+      <div className="mt-4 rounded-[1.75rem] border border-line bg-white p-5 shadow-soft">
+        <div className="flex items-start gap-3">
+          <div className="grid h-10 w-10 shrink-0 place-items-center rounded-xl bg-cream text-taupe"><Download size={19} /></div>
+          <div><p className="text-sm font-extrabold">Ekspor jurnal</p><p className="mt-1 text-xs leading-5 text-taupe">Unduh foto teroptimasi beserta catatan dan mood dalam satu file ZIP.</p></div>
+        </div>
+        <Button onClick={downloadJournal} disabled={exportBusy || !snaps.length} className="mt-4 w-full bg-cream px-4 py-3 text-sm text-charcoal">
+          <Download size={16} />{exportBusy ? `Menyiapkan ${exportProgress.done}/${exportProgress.total} foto...` : `Unduh ZIP${snaps.length ? ` · ${snaps.length} foto` : ''}`}
+        </Button>
+        {exportError && <p role="alert" className="mt-3 text-xs leading-5 text-[#A54D37]">{exportError}</p>}
       </div>
       <Button onClick={onSignOut} className="mt-5 w-full border border-[#F2DAD3] bg-white px-5 py-3.5 text-sm text-[#B6533C] hover:bg-[#FFF6F3]"><LogOut size={17} /> Keluar dari akun</Button>
       <p className="mt-7 text-center text-xs text-taupe">FazaHub dibuat untuk dua orang. <Heart className="mx-1 inline text-terracotta" size={12} fill="currentColor" /></p>
@@ -355,10 +494,13 @@ function AddSnapModal({ userId, coupleId, onClose, onSaved }) {
   }, [file])
 
   function chooseFile(event) {
-    const selected = event.target.files?.[0]
+    const input = event.currentTarget
+    const selected = input.files?.[0]
+    input.value = ''
     if (!selected) return
-    if (!selected.type.startsWith('image/')) { setError('Pilih file gambar ya.'); return }
-    if (selected.size > 15 * 1024 * 1024) { setError('Ukuran foto maksimal 15 MB.'); return }
+    const isImage = selected.type.startsWith('image/') || /\.(jpe?g|png|gif|webp|heic|heif|avif)$/i.test(selected.name)
+    if (!isImage) { setFile(null); setError('Pilih file gambar ya.'); return }
+    if (selected.size > 15 * 1024 * 1024) { setFile(null); setError('Ukuran foto maksimal 15 MB.'); return }
     setError('')
     setFile(selected)
   }
@@ -369,6 +511,7 @@ function AddSnapModal({ userId, coupleId, onClose, onSaved }) {
     if (!mood) { setError('Pilih mood untuk momen ini.'); return }
     if (!cloudName || !uploadPreset) { setError('Cloudinary belum dikonfigurasi. Isi cloud name dan unsigned upload preset di .env.'); return }
     setBusy(true); setError('')
+    let uploadedImageUrl
     try {
       const body = new FormData()
       body.append('file', file)
@@ -376,10 +519,14 @@ function AddSnapModal({ userId, coupleId, onClose, onSaved }) {
       const response = await fetch(`https://api.cloudinary.com/v1_1/${encodeURIComponent(cloudName)}/image/upload`, { method: 'POST', body })
       const uploaded = await response.json()
       if (!response.ok) throw new Error(uploaded.error?.message || 'Foto gagal diunggah ke Cloudinary.')
+      if (!uploaded.secure_url) throw new Error('Cloudinary tidak mengembalikan alamat foto yang aman.')
+      uploadedImageUrl = uploaded.secure_url
       const { error: saveError } = await supabase.from('daily_snaps').insert({
-        couple_id: coupleId, user_id: userId, snap_date: date, image_url: uploaded.secure_url, mood, note: note.trim() || null
+        couple_id: coupleId, user_id: userId, snap_date: date, image_url: uploadedImageUrl, mood, note: note.trim() || null
       })
-      if (saveError) throw saveError
+      if (saveError) {
+        throw new Error(`Foto sudah terunggah, tetapi catatannya gagal disimpan: ${saveError.message}. Periksa feed sebelum mencoba unggah ulang.`)
+      }
       onSaved()
     } catch (uploadError) {
       setError(uploadError.message || 'Momen belum berhasil disimpan. Coba lagi ya.')
@@ -394,9 +541,9 @@ function AddSnapModal({ userId, coupleId, onClose, onSaved }) {
           <Button aria-label="Tutup" onClick={onClose} disabled={busy} className="h-10 w-10 rounded-xl bg-white text-taupe"><X size={19} /></Button>
         </div>
         <form onSubmit={submit} className="mt-5 space-y-4">
-          <input ref={inputRef} type="file" accept="image/*" capture="environment" onChange={chooseFile} className="hidden" />
+          <input ref={inputRef} type="file" accept="image/*" onChange={chooseFile} className="hidden" />
           <button type="button" onClick={() => inputRef.current?.click()} className={`relative flex w-full items-center justify-center overflow-hidden rounded-[1.5rem] border border-dashed ${preview ? 'border-transparent' : 'border-[#E6D9D0] bg-white'} ${preview ? 'aspect-[4/3]' : 'h-40'}`}>
-            {preview ? <><img src={preview} alt="Pratinjau foto" className="absolute inset-0 h-full w-full object-cover" /><span className="absolute bottom-3 right-3 rounded-xl bg-black/55 px-3 py-2 text-xs font-bold text-white">Ganti foto</span></> : <span className="text-center"><span className="mx-auto grid h-12 w-12 place-items-center rounded-2xl bg-[#FFF0EC] text-terracotta"><ImagePlus size={22} /></span><span className="mt-3 block text-sm font-bold">Pilih foto atau buka kamera</span><span className="mt-1 block text-xs text-taupe">JPG, PNG, HEIC · maksimal 15 MB</span></span>}
+            {preview ? <><img src={preview} alt="Pratinjau foto" className="absolute inset-0 h-full w-full object-cover" /><span className="absolute bottom-3 right-3 rounded-xl bg-black/55 px-3 py-2 text-xs font-bold text-white">Ganti foto</span></> : <span className="text-center"><span className="mx-auto grid h-12 w-12 place-items-center rounded-2xl bg-[#FFF0EC] text-terracotta"><ImagePlus size={22} /></span><span className="mt-3 block text-sm font-bold">Pilih foto dari galeri atau kamera</span><span className="mt-1 block text-xs text-taupe">JPG, PNG, HEIC · maksimal 15 MB</span></span>}
           </button>
           <div>
             <p className="mb-2 text-xs font-bold">Mood hari ini</p>
@@ -486,7 +633,7 @@ function AppShell({ user, couple, onSignOut }) {
               <div className="space-y-4">{filteredSnaps.map(snap => <SnapCard key={snap.id} snap={snap} partnerName={partnerName} />)}</div>
             </div>
             : <CalendarView snaps={snaps} onSelectDate={setSelectedDate} />)}
-          {tab === 'settings' && <SettingsView couple={couple} user={user} partnerName={partnerName} onSignOut={onSignOut} />}
+          {tab === 'settings' && <SettingsView couple={couple} user={user} partnerName={partnerName} snaps={snaps} onSignOut={onSignOut} />}
         </main>
         <nav className="safe-bottom fixed bottom-0 left-0 right-0 z-30 mx-auto max-w-md border-t border-white/70 bg-white/85 px-7 pt-2 shadow-[0_-8px_30px_rgba(45,42,38,.06)] backdrop-blur-xl sm:absolute">
           <div className="flex items-center justify-around">

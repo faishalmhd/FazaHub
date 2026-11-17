@@ -1,4 +1,4 @@
--- FazaHub schema. Run once in the Supabase SQL editor.
+-- FazaHub schema. Safe to re-run in the Supabase SQL editor when updating the schema.
 create extension if not exists pgcrypto;
 
 create table if not exists public.couples (
@@ -31,8 +31,25 @@ create table if not exists public.daily_snaps (
 create index if not exists idx_daily_snaps_couple_date
   on public.daily_snaps (couple_id, snap_date, created_at desc);
 
+create table if not exists public.push_subscriptions (
+  id uuid primary key default gen_random_uuid(),
+  user_id uuid references auth.users(id) on delete cascade not null,
+  couple_id uuid references public.couples(id) on delete cascade not null,
+  endpoint text unique not null,
+  subscription jsonb not null,
+  timezone text not null default 'UTC',
+  reminder_time time not null default time '20:00',
+  last_reminded_on date,
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now()
+);
+
+create index if not exists idx_push_subscriptions_reminders
+  on public.push_subscriptions (reminder_time, timezone);
+
 alter table public.couples enable row level security;
 alter table public.daily_snaps enable row level security;
+alter table public.push_subscriptions enable row level security;
 
 drop policy if exists "Users can view their own couple" on public.couples;
 create policy "Users can view their own couple" on public.couples
@@ -69,6 +86,35 @@ create policy "Couple members can insert snaps" on public.daily_snaps
 
 drop policy if exists "Users can delete their own snaps" on public.daily_snaps;
 create policy "Users can delete their own snaps" on public.daily_snaps
+  for delete using (auth.uid() = user_id);
+
+drop policy if exists "Users can view their own push subscriptions" on public.push_subscriptions;
+create policy "Users can view their own push subscriptions" on public.push_subscriptions
+  for select using (auth.uid() = user_id);
+
+drop policy if exists "Users can add their own push subscriptions" on public.push_subscriptions;
+create policy "Users can add their own push subscriptions" on public.push_subscriptions
+  for insert with check (
+    auth.uid() = user_id and exists (
+      select 1 from public.couples
+      where couples.id = push_subscriptions.couple_id
+        and (couples.partner_1_id = auth.uid() or couples.partner_2_id = auth.uid())
+    )
+  );
+
+drop policy if exists "Users can update their own push subscriptions" on public.push_subscriptions;
+create policy "Users can update their own push subscriptions" on public.push_subscriptions
+  for update using (auth.uid() = user_id)
+  with check (
+    auth.uid() = user_id and exists (
+      select 1 from public.couples
+      where couples.id = push_subscriptions.couple_id
+        and (couples.partner_1_id = auth.uid() or couples.partner_2_id = auth.uid())
+    )
+  );
+
+drop policy if exists "Users can remove their own push subscriptions" on public.push_subscriptions;
+create policy "Users can remove their own push subscriptions" on public.push_subscriptions
   for delete using (auth.uid() = user_id);
 
 create or replace function public.join_couple(p_invite_code text, p_partner_name text)

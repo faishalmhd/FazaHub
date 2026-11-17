@@ -8,6 +8,12 @@ export default defineConfig({
     VitePWA({
       registerType: 'autoUpdate',
       includeAssets: ['favicon.svg'],
+      strategies: 'injectManifest',
+      srcDir: 'src',
+      filename: 'sw.js',
+      injectManifest: {
+        globPatterns: ['**/*.{js,css,html,svg,png,ico}']
+      },
       manifest: {
         name: 'FazaHub — Daily Memory Journal',
         short_name: 'FazaHub',
@@ -22,23 +28,6 @@ export default defineConfig({
           { src: '/pwa-512.svg', sizes: '512x512', type: 'image/svg+xml', purpose: 'any' }
         ]
       },
-      workbox: {
-        navigateFallback: '/index.html',
-        runtimeCaching: [
-          {
-            urlPattern: /^https:\/\/res\.cloudinary\.com\/.*$/i,
-            handler: 'CacheFirst',
-            options: {
-              cacheName: 'fazahub-images',
-              expiration: { maxEntries: 80, maxAgeSeconds: 60 * 60 * 24 * 30 }
-            }
-          },
-          {
-            urlPattern: /^https:\/\/.*\.supabase\.co\/.*$/i,
-            handler: 'NetworkOnly'
-          }
-        ]
-      }
     })
   ]
 })
