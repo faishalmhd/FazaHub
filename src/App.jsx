@@ -1,19 +1,21 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
-  ArrowLeft, ArrowRight, Bell, BellOff, CalendarDays, Camera, Check, ChevronLeft, ChevronRight,
-  Download, Heart, ImagePlus, LogOut, Plus, Settings, Sparkles, Upload, X
+  ArrowRight, Bell, CalendarDays, Camera, Check, ChevronLeft, ChevronRight,
+  Download, Heart, ImagePlus, LogOut, Plus, Settings, Sparkles, Trash2, Upload, X
 } from 'lucide-react'
 import { isSupabaseConfigured, supabase } from './lib/supabase'
+import { uploadImage, optimizedImage } from './lib/cloudinary'
 import { exportJournal } from './lib/exportJournal'
-import { decodeVapidPublicKey, getPushRegistration } from './lib/webPush'
+import { compressImage } from './utils/compressImage'
+import { checkLocalReminder, downloadCalendarAlarm, readReminderSettings, saveReminderSettings, showTestReminder } from './utils/reminder'
 
 const moods = [
-  { label: 'Bahagia', emoji: '😊' },
-  { label: 'Tenang', emoji: '😌' },
-  { label: 'Rindu', emoji: '🥺' },
-  { label: 'Semangat', emoji: '✨' },
-  { label: 'Lelah', emoji: '😴' },
-  { label: 'Bersyukur', emoji: '🙏' }
+  { label: 'Happy', emoji: '☀️' },
+  { label: 'Capek', emoji: '🥱' },
+  { label: 'Kangen', emoji: '🥺' },
+  { label: 'Makan', emoji: '🍽️' },
+  { label: 'Sibuk', emoji: '🔥' },
+  { label: 'Sayang', emoji: '🥰' }
 ]
 
 const dateLabel = (value, options = { weekday: 'long', day: 'numeric', month: 'long' }) =>
@@ -22,13 +24,6 @@ const dateLabel = (value, options = { weekday: 'long', day: 'numeric', month: 'l
 const localDate = (date = new Date()) => {
   const offset = date.getTimezoneOffset()
   return new Date(date.getTime() - offset * 60000).toISOString().slice(0, 10)
-}
-
-function optimizedImage(url, thumbnail = false) {
-  if (!url?.includes('/upload/')) return url
-  return url.replace('/upload/', thumbnail
-    ? '/upload/w_300,c_fill,f_auto,q_auto/'
-    : '/upload/w_1080,f_auto,q_auto/')
 }
 
 function Button({ children, className = '', ...props }) {
@@ -64,12 +59,17 @@ function AuthScreen() {
     event.preventDefault()
     setBusy(true)
     setMessage('')
-    const result = mode === 'login'
-      ? await supabase.auth.signInWithPassword({ email, password })
-      : await supabase.auth.signUp({ email, password, options: { data: { full_name: name.trim() } } })
-    setBusy(false)
-    if (result.error) setMessage(result.error.message)
-    else if (mode === 'signup' && !result.data.session) setMessage('Cek email kamu untuk mengonfirmasi akun, lalu masuk.')
+    try {
+      const result = mode === 'login'
+        ? await supabase.auth.signInWithPassword({ email, password })
+        : await supabase.auth.signUp({ email, password, options: { data: { full_name: name.trim() } } })
+      if (result.error) setMessage(result.error.message)
+      else if (mode === 'signup' && !result.data.session) setMessage('Cek email kamu untuk mengonfirmasi akun, lalu masuk.')
+    } catch (error) {
+      setMessage(error.message || 'Koneksi gagal. Coba lagi.')
+    } finally {
+      setBusy(false)
+    }
   }
 
   return (
@@ -105,7 +105,7 @@ function Brand({ compact = false }) {
     <div className={`flex items-center gap-3 ${compact ? '' : 'justify-center'}`}>
       <span className="grid h-12 w-12 place-items-center rounded-[17px] bg-terracotta text-white shadow-[0_8px_20px_rgba(224,122,95,.24)]"><Heart size={23} fill="currentColor" /></span>
       <div>
-        <div className="font-['Manrope'] text-[1.35rem] font-extrabold tracking-[-.06em]">Faza<span className="text-terracotta">Hub</span></div>
+        <div className="font-sans text-[1.35rem] font-extrabold tracking-[-.06em]">Faza<span className="text-terracotta">Hub</span></div>
         {!compact && <div className="mt-0.5 text-xs text-taupe">ruang kecil untuk cerita kita</div>}
       </div>
     </div>
@@ -127,32 +127,45 @@ function CoupleSetup({ user, onComplete, onSignOut }) {
   const [code, setCode] = useState('')
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
-  const [createdCode, setCreatedCode] = useState('')
 
   async function createCouple(event) {
     event.preventDefault()
-    setBusy(true); setError('')
-    const inviteCode = Array.from(crypto.getRandomValues(new Uint8Array(6)), byte => 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'[byte % 32]).join('')
-    const { data, error: createError } = await supabase.from('couples').insert({
-      invite_code: inviteCode, partner_1_id: user.id, partner_1_name: name.trim()
-    }).select().single()
-    setBusy(false)
-    if (createError) setError(createError.message)
-    else { setCreatedCode(data.invite_code); onComplete(data) }
+    if (busy) return
+    setBusy(true)
+    setError('')
+    try {
+      const inviteCode = Array.from(crypto.getRandomValues(new Uint8Array(6)), byte => 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'[byte % 32]).join('')
+      const { data, error: createError } = await supabase.from('couples').insert({
+        invite_code: inviteCode, partner_1_id: user.id, partner_1_name: name.trim()
+      }).select().single()
+      if (createError) throw createError
+      onComplete(data)
+    } catch (createError) {
+      setError(createError.code === '23505'
+        ? 'Akun ini sudah terhubung ke ruang lain. Muat ulang aplikasi untuk membuka ruang tersebut.'
+        : createError.message || 'Ruang belum berhasil dibuat. Coba lagi.')
+    } finally {
+      setBusy(false)
+    }
   }
 
   async function joinCouple(event) {
     event.preventDefault()
-    setBusy(true); setError('')
-    const { data, error: joinError } = await supabase.rpc('join_couple', {
-      p_invite_code: code.trim().toUpperCase(), p_partner_name: name.trim()
-    })
-    setBusy(false)
-    if (joinError) setError(joinError.message)
-    else {
+    if (busy) return
+    setBusy(true)
+    setError('')
+    try {
+      const { data, error: joinError } = await supabase.rpc('join_couple', {
+        p_invite_code: code.trim().toUpperCase(), p_partner_name: name.trim()
+      })
+      if (joinError) throw joinError
       const { data: couple, error: fetchError } = await supabase.from('couples').select('*').eq('id', data).single()
-      if (fetchError) setError(fetchError.message)
-      else onComplete(couple)
+      if (fetchError) throw fetchError
+      onComplete(couple)
+    } catch (joinError) {
+      setError(joinError.message || 'Kode belum berhasil dipakai. Coba lagi.')
+    } finally {
+      setBusy(false)
     }
   }
 
@@ -179,7 +192,6 @@ function CoupleSetup({ user, onComplete, onSignOut }) {
               <button type="button" onClick={() => { setMode('choice'); setError('') }} className="w-full py-2 text-sm font-semibold text-taupe">Kembali</button>
             </form>
           )}
-          {createdCode && <div className="mt-4 rounded-2xl bg-cream p-4 text-center text-sm">Kode undangan: <strong className="ml-1 tracking-[.15em] text-terracotta">{createdCode}</strong></div>}
           <button onClick={onSignOut} className="mt-4 flex w-full items-center justify-center gap-2 text-xs font-semibold text-taupe hover:text-charcoal"><LogOut size={14} /> Keluar</button>
         </div>
       </section>
@@ -187,48 +199,45 @@ function CoupleSetup({ user, onComplete, onSignOut }) {
   )
 }
 
-function SnapCard({ snap, partnerName }) {
+function SnapCard({ snap, partnerName, canDelete = false, onDelete }) {
   const mood = moods.find(item => item.label === snap.mood)
   const author = partnerName(snap.user_id)
   return (
-    <article className="overflow-hidden rounded-[1.75rem] border border-line bg-white shadow-soft animate-rise-in">
-      <img src={optimizedImage(snap.image_url)} alt={snap.note || `Kenangan ${dateLabel(snap.snap_date)}`} className="aspect-[4/4.5] w-full bg-cream object-cover" loading="lazy" />
-      <div className="p-4 sm:p-5">
-        <div className="flex items-start justify-between gap-3">
-          <div>
-            <div className="text-sm font-bold">{author} <span className="font-medium text-taupe">berbagi momen</span></div>
-            <div className="mt-1 text-xs text-taupe">{dateLabel(snap.snap_date)} · {new Intl.DateTimeFormat('id-ID', { hour: '2-digit', minute: '2-digit' }).format(new Date(snap.created_at))}</div>
+    <article className="relative isolate aspect-[4/5] overflow-hidden rounded-2xl border border-white/10 bg-[#121215] animate-rise-in">
+      <img src={optimizedImage(snap.image_url)} alt={snap.note || `Kenangan ${dateLabel(snap.snap_date)}`} className="absolute inset-0 h-full w-full object-cover" loading="lazy" />
+      <div className="absolute inset-0 bg-gradient-to-t from-black/85 via-black/10 to-black/20" />
+      {mood && <span className="absolute left-3 top-3 rounded-full border border-white/15 bg-black/35 px-3 py-1.5 text-xs font-semibold text-white backdrop-blur-md">{mood.emoji} {mood.label}</span>}
+      {canDelete && <button type="button" onClick={() => onDelete(snap)} aria-label="Hapus foto ini" className="absolute right-3 top-3 grid h-9 w-9 place-items-center rounded-full border border-white/15 bg-black/35 text-white backdrop-blur-md"><Trash2 size={16} /></button>}
+      <div className="absolute inset-x-0 bottom-0 p-4 text-white sm:p-5">
+        <div className="flex items-end justify-between gap-3">
+          <div className="min-w-0">
+            <p className="truncate text-base font-bold tracking-tight">{author}</p>
+            <p className="mt-1 font-mono text-xs tracking-wide text-white/75">{new Intl.DateTimeFormat('id-ID', { hour: '2-digit', minute: '2-digit' }).format(new Date(snap.created_at))} <span className="mx-1">·</span> {dateLabel(snap.snap_date, { day: 'numeric', month: 'short' })}</p>
           </div>
-          {mood && <span className="inline-flex shrink-0 items-center gap-1.5 rounded-full bg-cream px-3 py-1.5 text-xs font-semibold text-taupe"><span>{mood.emoji}</span>{mood.label}</span>}
+          <span className="shrink-0 rounded-full border border-white/15 bg-black/25 px-2.5 py-1 text-[10px] font-semibold uppercase tracking-wider text-white/80">FazaHub</span>
         </div>
-        {snap.note && <p className="mt-4 whitespace-pre-wrap text-sm leading-6 text-charcoal">{snap.note}</p>}
+        {snap.note && <p className="mt-3 line-clamp-3 whitespace-pre-wrap text-sm leading-5 text-white/90">{snap.note}</p>}
       </div>
     </article>
   )
 }
 
-function FeedView({ snaps, partnerName, onAdd, loading }) {
-  const grouped = useMemo(() => snaps.reduce((groups, snap) => {
-    groups[snap.snap_date] = [...(groups[snap.snap_date] || []), snap]
-    return groups
-  }, {}), [snaps])
-
+function FeedView({ snaps, partnerName, userId, onAdd, loading, streak, todayUserCount, reminderDue, onDelete }) {
   return (
     <div className="pb-6">
-      <div className="mb-6 flex items-end justify-between">
-        <div><p className="text-xs font-bold uppercase tracking-[.17em] text-terracotta">Jurnal kalian</p><h1 className="mt-1 text-2xl font-extrabold">Momen terbaru</h1></div>
-        <Button onClick={onAdd} className="h-11 w-11 rounded-2xl bg-terracotta text-white shadow-[0_8px_20px_rgba(224,122,95,.25)]" aria-label="Tambah foto"><Plus size={22} /></Button>
-      </div>
-      {loading ? <Loading /> : snaps.length === 0 ? <EmptyState onAdd={onAdd} /> : (
-        <div className="space-y-7">
-          {Object.entries(grouped).map(([date, entries]) => (
-            <section key={date}>
-              <div className="mb-3 flex items-center gap-2 text-xs font-bold text-taupe"><span className="h-px flex-1 bg-line" /><span>{dateLabel(date)}</span><span className="h-px flex-1 bg-line" /></div>
-              <div className="space-y-4">{entries.map(snap => <SnapCard key={snap.id} snap={snap} partnerName={partnerName} />)}</div>
-            </section>
-          ))}
+      <div className="mb-6">
+        <p className="font-mono text-xs uppercase tracking-[.16em] text-taupe">{dateLabel(localDate())}</p>
+        <div className="mt-2 flex items-end justify-between gap-3">
+          <div><p className="text-xs font-semibold text-taupe">Cerita hari ini</p><h1 className="mt-1 text-3xl font-extrabold tracking-tight">Hari ini</h1></div>
+          <span className="rounded-full border border-line bg-white px-3 py-1.5 font-mono text-xs font-bold text-charcoal">{streak}D <span aria-hidden="true">🔥</span></span>
         </div>
-      )}
+        <p className="mt-3 text-xs text-taupe">{todayUserCount > 0 ? `Kamu sudah menyimpan ${todayUserCount} momen hari ini.` : 'Simpan momen pertamamu hari ini.'}</p>
+      </div>
+      {reminderDue && <div className="mb-4 rounded-2xl border border-white/10 bg-white/5 px-4 py-3 text-sm text-white/80">Hari ini masih punya satu ruang untuk disimpan.</div>}
+      {loading ? <Loading /> : snaps.length === 0
+        ? <EmptyState onAdd={onAdd} />
+        : <div className="space-y-4">{snaps.map(snap => <SnapCard key={snap.id} snap={snap} partnerName={partnerName} canDelete={snap.user_id === userId} onDelete={onDelete} />)}</div>}
+      <Button onClick={onAdd} className="fixed bottom-24 right-[max(calc((100vw-26rem)/2+1rem),1rem)] z-20 h-14 w-14 rounded-full bg-white text-black shadow-xl" aria-label="Tambah foto"><Plus size={23} /></Button>
     </div>
   )
 }
@@ -259,7 +268,6 @@ function CalendarView({ snaps, onSelectDate }) {
     acc[snap.snap_date] = [...(acc[snap.snap_date] || []), snap]
     return acc
   }, {}), [snaps])
-  const weekdayNames = ['S', 'S', 'R', 'K', 'J', 'S', 'M']
   const orderedWeekdays = ['Sen', 'Sel', 'Rab', 'Kam', 'Jum', 'Sab', 'Min']
 
   return (
@@ -281,7 +289,7 @@ function CalendarView({ snaps, onSelectDate }) {
             return (
               <button key={date} onClick={() => entries.length && onSelectDate(date)} disabled={!entries.length} className={`relative aspect-square overflow-hidden rounded-xl transition ${entries.length ? 'ring-2 ring-transparent hover:ring-terracotta' : 'cursor-default'}`}>
                 {entries[0] ? <img src={optimizedImage(entries[0].image_url, true)} alt="" className="absolute inset-0 h-full w-full object-cover" loading="lazy" /> : <span className={`grid h-full place-items-center text-xs ${date === localDate() ? 'font-extrabold text-terracotta' : 'text-taupe'}`}>{day}</span>}
-                {entries[0] && <><span className="absolute inset-0 bg-black/20" /><span className="absolute inset-0 grid place-items-center text-xs font-bold text-white">{day}</span>{entries.length > 1 && <span className="absolute bottom-1 right-1 h-1.5 w-1.5 rounded-full bg-white ring-1 ring-black/10" />}</>}
+                {entries[0] && <><span className="absolute inset-0 bg-black/20" /><span className="absolute inset-0 grid place-items-center text-xs font-bold text-white">{day}</span><span className="absolute bottom-1 right-1 min-w-4 rounded-full bg-black/70 px-1 text-[9px] font-bold leading-4 text-white">{entries.length > 1 ? `+${entries.length - 1}` : '1'}</span></>}
               </button>
             )
           })}
@@ -292,107 +300,53 @@ function CalendarView({ snaps, onSelectDate }) {
   )
 }
 
-function SettingsView({ couple, user, partnerName, snaps, onSignOut }) {
+function SettingsView({ couple, user, partnerName, snaps, theme, onThemeChange, onSignOut, onLeaveRoom }) {
   const [copied, setCopied] = useState(false)
-  const [reminderEnabled, setReminderEnabled] = useState(false)
-  const [reminderLoading, setReminderLoading] = useState(true)
-  const [reminderBusy, setReminderBusy] = useState(false)
-  const [reminderMessage, setReminderMessage] = useState('')
+  const [reminder, setReminder] = useState(() => readReminderSettings(user.id))
   const [reminderError, setReminderError] = useState('')
   const [exportBusy, setExportBusy] = useState(false)
   const [exportProgress, setExportProgress] = useState({ done: 0, total: 0 })
   const [exportError, setExportError] = useState('')
+  const [confirmLeave, setConfirmLeave] = useState(false)
+  const [leaving, setLeaving] = useState(false)
+  const [roomError, setRoomError] = useState('')
+  const [reminderBusy, setReminderBusy] = useState(false)
   const isPartner1 = couple.partner_1_id === user.id
   const myName = isPartner1 ? couple.partner_1_name : couple.partner_2_name
   const otherName = isPartner1 ? couple.partner_2_name : couple.partner_1_name
-  const vapidPublicKey = import.meta.env.VITE_VAPID_PUBLIC_KEY
-
-  useEffect(() => {
-    let active = true
-    async function checkSubscription() {
-      try {
-        if (!vapidPublicKey) return
-        const registration = await getPushRegistration()
-        const subscription = await registration.pushManager.getSubscription()
-        if (!subscription) return
-        const { data, error } = await supabase.from('push_subscriptions')
-          .select('id')
-          .eq('user_id', user.id)
-          .eq('endpoint', subscription.endpoint)
-          .maybeSingle()
-        if (error) throw error
-        if (active) setReminderEnabled(Boolean(data))
-      } catch (error) {
-        if (active) setReminderError(error.message || 'Status pengingat gagal diperiksa.')
-      } finally {
-        if (active) setReminderLoading(false)
-      }
-    }
-    checkSubscription()
-    return () => { active = false }
-  }, [user.id, vapidPublicKey])
+  const reminderLabel = reminder.time.replace(':', '.')
 
   async function toggleReminder() {
+    if (reminderBusy) return
     setReminderBusy(true)
     setReminderError('')
-    setReminderMessage('')
     try {
-      if (!vapidPublicKey) throw new Error('Push belum dikonfigurasi. Tambahkan VITE_VAPID_PUBLIC_KEY dan deploy fungsi pengingat Supabase.')
-      const registration = await getPushRegistration()
-      let subscription = await registration.pushManager.getSubscription()
-
-      if (reminderEnabled) {
-        const endpoint = subscription?.endpoint
-        let unsubscribeError
-        if (subscription) {
-          try {
-            await subscription.unsubscribe()
-          } catch (error) {
-            unsubscribeError = error
-          }
-        }
-        if (endpoint) {
-          const { error } = await supabase.from('push_subscriptions').delete()
-            .eq('user_id', user.id)
-            .eq('endpoint', endpoint)
-          if (error) throw error
-        }
-        setReminderEnabled(false)
-        if (unsubscribeError) throw new Error('Pengingat dinonaktifkan di server, tetapi browser belum menghapus langganannya. Coba aktifkan lalu nonaktifkan lagi.')
-        setReminderMessage('Pengingat harian dinonaktifkan.')
-        return
+      if (reminder.enabled) {
+        const next = { ...reminder, enabled: false }
+        saveReminderSettings(user.id, next)
+        setReminder(next)
+      } else {
+        await showTestReminder()
+        const next = { ...reminder, enabled: true }
+        saveReminderSettings(user.id, next)
+        setReminder(next)
       }
-
-      const permission = await Notification.requestPermission()
-      if (permission !== 'granted') throw new Error('Izin notifikasi belum diberikan. Aktifkan notifikasi FazaHub di pengaturan browser.')
-      let createdSubscription = false
-      if (!subscription) {
-        subscription = await registration.pushManager.subscribe({
-          userVisibleOnly: true,
-          applicationServerKey: decodeVapidPublicKey(vapidPublicKey)
-        })
-        createdSubscription = true
-      }
-      const timezone = Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC'
-      const { error } = await supabase.from('push_subscriptions').upsert({
-        user_id: user.id,
-        couple_id: couple.id,
-        endpoint: subscription.endpoint,
-        subscription: subscription.toJSON(),
-        timezone,
-        reminder_time: '20:00:00',
-        updated_at: new Date().toISOString()
-      }, { onConflict: 'endpoint' })
-      if (error) {
-        if (createdSubscription) await subscription.unsubscribe()
-        throw error
-      }
-      setReminderEnabled(true)
-      setReminderMessage('Pengingat aktif setiap hari pukul 20.00 waktu lokal, kecuali jika salah satu dari kalian sudah menyimpan foto hari itu.')
     } catch (error) {
       setReminderError(error.message || 'Pengaturan pengingat gagal. Coba lagi.')
     } finally {
       setReminderBusy(false)
+    }
+  }
+
+  function changeReminderTime(time) {
+    if (!/^\d{2}:\d{2}$/.test(time)) return
+    const next = { ...reminder, time }
+    try {
+      saveReminderSettings(user.id, next)
+      setReminder(next)
+      setReminderError('')
+    } catch (error) {
+      setReminderError(error.message)
     }
   }
 
@@ -418,11 +372,24 @@ function SettingsView({ couple, user, partnerName, snaps, onSignOut }) {
       setCopied(false)
     }
   }
+
+  async function leaveRoom() {
+    setLeaving(true)
+    try {
+      await onLeaveRoom()
+      setConfirmLeave(false)
+    } catch (error) {
+      setRoomError(error.message || 'Ruang belum berhasil ditinggalkan.')
+    } finally {
+      setLeaving(false)
+    }
+  }
+
   return (
     <div className="animate-rise-in pb-6">
-      <p className="text-xs font-bold uppercase tracking-[.17em] text-terracotta">Pengaturan</p>
-      <h1 className="mt-1 text-2xl font-extrabold">Ruang kalian</h1>
-      <div className="mt-5 rounded-[1.75rem] border border-line bg-white p-5 shadow-soft">
+      <p className="text-xs font-bold uppercase tracking-[.17em] text-terracotta">FazaHub / Pengaturan</p>
+      <h1 className="mt-1 text-2xl font-extrabold">Ruang kita</h1>
+      <div className="mt-5 rounded-3xl border border-line bg-white p-5 shadow-soft">
         <div className="flex items-center gap-3">
           <div className="grid h-12 w-12 place-items-center rounded-2xl bg-[#FFF0EC] text-terracotta"><Heart fill="currentColor" size={21} /></div>
           <div><p className="text-sm font-extrabold">{myName} & {otherName || 'pasanganmu'}</p><p className="mt-1 text-xs text-taupe">{otherName ? 'Ruang kalian sudah berdua 🤍' : 'Menunggu pasangan bergabung'}</p></div>
@@ -430,31 +397,40 @@ function SettingsView({ couple, user, partnerName, snaps, onSignOut }) {
         {!otherName && <div className="mt-5 rounded-2xl bg-cream p-4">
           <p className="text-xs font-semibold text-taupe">Bagikan kode ini ke pasanganmu</p>
           <div className="mt-2 flex items-center justify-between">
-            <span className="text-xl font-extrabold tracking-[.2em] text-terracotta">{couple.invite_code}</span>
+            <span className="font-mono text-xl font-extrabold tracking-[.2em] text-terracotta">{couple.invite_code}</span>
             <Button onClick={copyCode} className="rounded-xl bg-white px-3 py-2 text-xs font-bold text-charcoal shadow-sm">{copied ? <Check size={14} /> : <Upload size={14} />}{copied ? 'Tersalin' : 'Salin kode'}</Button>
           </div>
         </div>}
       </div>
-      <div className="mt-4 rounded-[1.75rem] border border-line bg-white p-5 shadow-soft">
+      <div className="mt-4 rounded-3xl border border-line bg-white p-5 shadow-soft">
         <p className="text-xs font-bold uppercase tracking-[.12em] text-taupe">Akun</p>
         <div className="mt-4 flex items-center justify-between gap-3"><span className="text-sm font-semibold">Email</span><span className="truncate text-sm text-taupe">{user.email}</span></div>
       </div>
-      <div className="mt-4 rounded-[1.75rem] border border-line bg-white p-5 shadow-soft">
+      <div className="mt-4 rounded-3xl border border-line bg-white p-5 shadow-soft">
+        <div className="flex items-center justify-between gap-4">
+          <div><p className="text-sm font-extrabold">Tampilan</p><p className="mt-1 text-xs text-taupe">Pilih tema yang nyaman buatmu.</p></div>
+          <button type="button" onClick={() => onThemeChange(theme === 'dark' ? 'light' : 'dark')} className="rounded-full border border-line bg-cream px-4 py-2 text-xs font-bold">{theme === 'dark' ? 'Gelap' : 'Terang'}</button>
+        </div>
+      </div>
+      <div className="mt-4 rounded-3xl border border-line bg-white p-5 shadow-soft">
         <div className="flex items-start gap-3">
           <div className="grid h-10 w-10 shrink-0 place-items-center rounded-xl bg-[#FFF0EC] text-terracotta"><Bell size={19} /></div>
           <div className="min-w-0 flex-1">
             <p className="text-sm font-extrabold">Pengingat harian</p>
-            <p className="mt-1 text-xs leading-5 text-taupe">Pukul 20.00 waktu lokal. Kami mengingatkan hanya jika belum ada foto hari ini.</p>
+            <p className="mt-1 text-xs leading-5 text-taupe">Notifikasi lokal saat FazaHub berjalan dan belum ada foto hari ini.</p>
           </div>
         </div>
-        <Button onClick={toggleReminder} disabled={reminderBusy || reminderLoading} className={`mt-4 w-full px-4 py-3 text-sm ${reminderEnabled ? 'border border-line bg-white text-charcoal' : 'bg-terracotta text-white'}`}>
-          {reminderBusy || reminderLoading ? 'Memeriksa...' : reminderEnabled ? <><BellOff size={16} /> Matikan pengingat</> : <><Bell size={16} /> Aktifkan pengingat</>}
+        <label className="mt-4 block text-xs font-bold">Jam pengingat
+          <input type="time" value={reminder.time} onChange={event => changeReminderTime(event.target.value)} className="mt-2 w-full rounded-xl border border-line bg-cream px-4 py-3 font-mono text-sm" />
+        </label>
+        <Button onClick={toggleReminder} disabled={reminderBusy} className={`mt-3 w-full px-4 py-3 text-sm ${reminder.enabled ? 'border border-line bg-white text-charcoal' : 'bg-terracotta text-white'}`}>
+          {reminderBusy ? 'Memeriksa izin...' : reminder.enabled ? <><Bell size={16} /> Pengingat Aktif ({reminderLabel}) · Matikan</> : <><Bell size={16} /> Aktifkan pengingat ({reminderLabel})</>}
         </Button>
-        {!vapidPublicKey && <p className="mt-3 text-xs leading-5 text-taupe">Pengingat push perlu VAPID key dan Edge Function Supabase. Lihat langkah konfigurasi di README.</p>}
-        {reminderMessage && <p role="status" className="mt-3 text-xs leading-5 text-[#47785A]">{reminderMessage}</p>}
+        <Button onClick={() => downloadCalendarAlarm(reminder.time)} className="mt-2 w-full border border-line bg-white px-4 py-3 text-xs text-charcoal">Tambah alarm ke Kalender HP (.ics)</Button>
+        <p className="mt-3 text-[11px] leading-5 text-taupe">Notifikasi aplikasi hanya bisa dipastikan saat browser atau PWA berjalan. Untuk alarm yang tetap berbunyi saat aplikasi ditutup, impor file kalender dan pastikan aplikasi Kalender mengaktifkan notifikasinya.</p>
         {reminderError && <p role="alert" className="mt-3 text-xs leading-5 text-[#A54D37]">{reminderError}</p>}
       </div>
-      <div className="mt-4 rounded-[1.75rem] border border-line bg-white p-5 shadow-soft">
+      <div className="mt-4 rounded-3xl border border-line bg-white p-5 shadow-soft">
         <div className="flex items-start gap-3">
           <div className="grid h-10 w-10 shrink-0 place-items-center rounded-xl bg-cream text-taupe"><Download size={19} /></div>
           <div><p className="text-sm font-extrabold">Ekspor jurnal</p><p className="mt-1 text-xs leading-5 text-taupe">Unduh foto teroptimasi beserta catatan dan mood dalam satu file ZIP.</p></div>
@@ -464,8 +440,20 @@ function SettingsView({ couple, user, partnerName, snaps, onSignOut }) {
         </Button>
         {exportError && <p role="alert" className="mt-3 text-xs leading-5 text-[#A54D37]">{exportError}</p>}
       </div>
+      <Button onClick={() => { setRoomError(''); setConfirmLeave(true) }} className="mt-4 w-full border border-[#F2DAD3] bg-white px-5 py-3.5 text-sm text-[#B6533C]"><LogOut size={17} /> Keluar / Hapus ruang</Button>
       <Button onClick={onSignOut} className="mt-5 w-full border border-[#F2DAD3] bg-white px-5 py-3.5 text-sm text-[#B6533C] hover:bg-[#FFF6F3]"><LogOut size={17} /> Keluar dari akun</Button>
       <p className="mt-7 text-center text-xs text-taupe">FazaHub dibuat untuk dua orang. <Heart className="mx-1 inline text-terracotta" size={12} fill="currentColor" /></p>
+      {confirmLeave && <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-5 backdrop-blur-sm">
+        <section role="dialog" aria-modal="true" aria-labelledby="leave-title" className="w-full max-w-sm rounded-3xl border border-line bg-white p-5 shadow-2xl">
+          <h2 id="leave-title" className="text-lg font-extrabold">{isPartner1 ? 'Hapus ruang kalian?' : 'Keluar dari ruang?'}</h2>
+          <p className="mt-2 text-sm leading-6 text-taupe">{isPartner1 ? 'Ruang, semua foto, dan catatan di dalamnya akan dihapus permanen untuk kalian berdua.' : 'Kamu akan keluar dari ruang. Foto kenangan tetap tersedia untuk pasanganmu.'}</p>
+          {roomError && <p role="alert" className="mt-3 text-xs leading-5 text-[#A54D37]">{roomError}</p>}
+          <div className="mt-5 flex gap-3">
+            <Button onClick={() => setConfirmLeave(false)} disabled={leaving} className="flex-1 border border-line bg-white px-4 py-3 text-sm">Batal</Button>
+            <Button onClick={leaveRoom} disabled={leaving} className="flex-1 bg-terracotta px-4 py-3 text-sm text-white">{leaving ? 'Memproses...' : isPartner1 ? 'Hapus ruang' : 'Keluar'}</Button>
+          </div>
+        </section>
+      </div>}
     </div>
   )
 }
@@ -481,8 +469,11 @@ function AddSnapModal({ userId, coupleId, onClose, onSaved }) {
   const [note, setNote] = useState('')
   const [date, setDate] = useState(localDate())
   const [busy, setBusy] = useState(false)
+  const [uploadProgress, setUploadProgress] = useState(0)
+  const [uploadStage, setUploadStage] = useState('')
   const [error, setError] = useState('')
-  const inputRef = useRef(null)
+  const galleryInputRef = useRef(null)
+  const cameraInputRef = useRef(null)
   const cloudName = import.meta.env.VITE_CLOUDINARY_CLOUD_NAME
   const uploadPreset = import.meta.env.VITE_CLOUDINARY_UPLOAD_PRESET
 
@@ -500,7 +491,7 @@ function AddSnapModal({ userId, coupleId, onClose, onSaved }) {
     if (!selected) return
     const isImage = selected.type.startsWith('image/') || /\.(jpe?g|png|gif|webp|heic|heif|avif)$/i.test(selected.name)
     if (!isImage) { setFile(null); setError('Pilih file gambar ya.'); return }
-    if (selected.size > 15 * 1024 * 1024) { setFile(null); setError('Ukuran foto maksimal 15 MB.'); return }
+    if (selected.size > 20 * 1024 * 1024) { setFile(null); setError('Ukuran foto maksimal 20 MB sebelum kompresi.'); return }
     setError('')
     setFile(selected)
   }
@@ -510,19 +501,18 @@ function AddSnapModal({ userId, coupleId, onClose, onSaved }) {
     if (!file) { setError('Pilih foto yang ingin disimpan.'); return }
     if (!mood) { setError('Pilih mood untuk momen ini.'); return }
     if (!cloudName || !uploadPreset) { setError('Cloudinary belum dikonfigurasi. Isi cloud name dan unsigned upload preset di .env.'); return }
-    setBusy(true); setError('')
-    let uploadedImageUrl
+    if (busy) return
+    setBusy(true)
+    setError('')
+    setUploadProgress(0)
     try {
-      const body = new FormData()
-      body.append('file', file)
-      body.append('upload_preset', uploadPreset)
-      const response = await fetch(`https://api.cloudinary.com/v1_1/${encodeURIComponent(cloudName)}/image/upload`, { method: 'POST', body })
-      const uploaded = await response.json()
-      if (!response.ok) throw new Error(uploaded.error?.message || 'Foto gagal diunggah ke Cloudinary.')
-      if (!uploaded.secure_url) throw new Error('Cloudinary tidak mengembalikan alamat foto yang aman.')
-      uploadedImageUrl = uploaded.secure_url
+      setUploadStage('Mengoptimalkan foto...')
+      const compressedFile = await compressImage(file)
+      setUploadStage(`Mengunggah foto · ${Math.max(1, Math.round(compressedFile.size / 1024))} KB`)
+      const imageUrl = await uploadImage(compressedFile, cloudName, uploadPreset, setUploadProgress)
+      setUploadStage('Menyimpan kenangan...')
       const { error: saveError } = await supabase.from('daily_snaps').insert({
-        couple_id: coupleId, user_id: userId, snap_date: date, image_url: uploadedImageUrl, mood, note: note.trim() || null
+        couple_id: coupleId, user_id: userId, snap_date: date, image_url: imageUrl, mood, note: note.trim() || null
       })
       if (saveError) {
         throw new Error(`Foto sudah terunggah, tetapi catatannya gagal disimpan: ${saveError.message}. Periksa feed sebelum mencoba unggah ulang.`)
@@ -530,7 +520,10 @@ function AddSnapModal({ userId, coupleId, onClose, onSaved }) {
       onSaved()
     } catch (uploadError) {
       setError(uploadError.message || 'Momen belum berhasil disimpan. Coba lagi ya.')
-    } finally { setBusy(false) }
+    } finally {
+      setBusy(false)
+      setUploadStage('')
+    }
   }
 
   return (
@@ -541,10 +534,14 @@ function AddSnapModal({ userId, coupleId, onClose, onSaved }) {
           <Button aria-label="Tutup" onClick={onClose} disabled={busy} className="h-10 w-10 rounded-xl bg-white text-taupe"><X size={19} /></Button>
         </div>
         <form onSubmit={submit} className="mt-5 space-y-4">
-          <input ref={inputRef} type="file" accept="image/*" onChange={chooseFile} className="hidden" />
-          <button type="button" onClick={() => inputRef.current?.click()} className={`relative flex w-full items-center justify-center overflow-hidden rounded-[1.5rem] border border-dashed ${preview ? 'border-transparent' : 'border-[#E6D9D0] bg-white'} ${preview ? 'aspect-[4/3]' : 'h-40'}`}>
-            {preview ? <><img src={preview} alt="Pratinjau foto" className="absolute inset-0 h-full w-full object-cover" /><span className="absolute bottom-3 right-3 rounded-xl bg-black/55 px-3 py-2 text-xs font-bold text-white">Ganti foto</span></> : <span className="text-center"><span className="mx-auto grid h-12 w-12 place-items-center rounded-2xl bg-[#FFF0EC] text-terracotta"><ImagePlus size={22} /></span><span className="mt-3 block text-sm font-bold">Pilih foto dari galeri atau kamera</span><span className="mt-1 block text-xs text-taupe">JPG, PNG, HEIC · maksimal 15 MB</span></span>}
-          </button>
+          <input ref={galleryInputRef} type="file" accept="image/jpeg,image/png,image/webp,image/heic" onChange={chooseFile} className="hidden" />
+          <input ref={cameraInputRef} type="file" accept="image/*" capture="environment" onChange={chooseFile} className="hidden" />
+          {preview && <div className="relative aspect-[4/3] overflow-hidden rounded-2xl bg-black/5"><img src={preview} alt="Pratinjau foto" className="absolute inset-0 h-full w-full object-cover" /></div>}
+          <div className="grid grid-cols-2 gap-3">
+            <Button type="button" onClick={() => galleryInputRef.current?.click()} className="border border-line bg-white px-3 py-3 text-xs text-charcoal"><ImagePlus size={16} />{preview ? 'Ganti dari galeri' : 'Pilih dari Galeri'}</Button>
+            <Button type="button" onClick={() => cameraInputRef.current?.click()} className="border border-line bg-white px-3 py-3 text-xs text-charcoal"><Camera size={16} />Buka Kamera</Button>
+          </div>
+          {!preview && <p className="text-center text-[11px] text-taupe">JPG, PNG, WebP, atau HEIC · maksimal 20 MB sebelum kompresi</p>}
           <div>
             <p className="mb-2 text-xs font-bold">Mood hari ini</p>
             <div className="scrollbar-hide flex gap-2 overflow-x-auto pb-1">
@@ -554,22 +551,41 @@ function AddSnapModal({ userId, coupleId, onClose, onSaved }) {
           <Field label="Tanggal momen" type="date" value={date} onChange={setDate} required />
           <label className="block"><span className="mb-2 block text-xs font-bold">Catatan kecil <span className="font-medium text-taupe">(opsional)</span></span><textarea value={note} onChange={event => setNote(event.target.value)} maxLength={200} rows={3} placeholder="Apa yang ingin kamu ingat dari hari ini?" className="w-full resize-none rounded-2xl border border-line bg-white px-4 py-3 text-sm leading-6 outline-none placeholder:text-[#B5AFA6] focus:border-terracotta focus:ring-4 focus:ring-[#E07A5F]/10" /><span className="mt-1 block text-right text-[10px] text-taupe">{note.length}/200</span></label>
           {error && <p role="alert" className="rounded-xl bg-[#FFF1ED] px-4 py-3 text-xs leading-5 text-[#A54D37]">{error}</p>}
-          <Button type="submit" disabled={busy} className="w-full bg-terracotta px-5 py-3.5 text-sm text-white hover:bg-[#cf6b52]">{busy ? <><span className="h-4 w-4 animate-spin rounded-full border-2 border-white/50 border-t-white" /> Menyimpan momen...</> : <><Sparkles size={17} /> Simpan kenangan</>}</Button>
+          {busy && <div aria-live="polite" className="space-y-2"><div className="h-1.5 overflow-hidden rounded-full bg-white/10"><div className="h-full rounded-full bg-rose-500 transition-[width]" style={{ width: `${uploadProgress}%` }} /></div><p className="text-center text-xs text-taupe">{uploadStage}{uploadProgress > 0 ? ` · ${uploadProgress}%` : ''}</p></div>}
+          <Button type="submit" disabled={busy} className="w-full bg-terracotta px-5 py-3.5 text-sm text-white hover:bg-[#cf6b52]">{busy ? <><span className="h-4 w-4 animate-spin rounded-full border-2 border-white/50 border-t-white" /> {uploadStage || 'Menyimpan momen...'}</> : <><Sparkles size={17} /> Simpan kenangan</>}</Button>
         </form>
       </section>
     </div>
   )
 }
 
-function AppShell({ user, couple, onSignOut }) {
-  const [tab, setTab] = useState('feed')
+const tabFromHash = hash => hash === '#calendar' ? 'calendar' : hash === '#space' ? 'space' : 'feed'
+
+function AppShell({ user, couple, theme, onThemeChange, onSignOut, onLeaveRoom }) {
   const [snaps, setSnaps] = useState([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
-  const [modalOpen, setModalOpen] = useState(false)
-  const [selectedDate, setSelectedDate] = useState('')
-  const isPartner1 = couple.partner_1_id === user.id
+  const [reminderDue, setReminderDue] = useState(false)
+  const [route, setRoute] = useState(() => {
+    const tab = tabFromHash(window.location.hash)
+    return { tab, overlay: null, date: null }
+  })
+  const routeRef = useRef(route)
+  const [today, setToday] = useState(() => localDate())
   const partnerName = userId => userId === couple.partner_1_id ? couple.partner_1_name : (couple.partner_2_name || 'Pasangan')
+
+  useEffect(() => {
+    const intervalId = window.setInterval(() => {
+      const currentDate = localDate()
+      setToday(previousDate => previousDate === currentDate ? previousDate : currentDate)
+    }, 30_000)
+    return () => window.clearInterval(intervalId)
+  }, [])
+
+  const setCurrentRoute = nextRoute => {
+    routeRef.current = nextRoute
+    setRoute(nextRoute)
+  }
 
   const loadSnaps = useCallback(async () => {
     const pageSize = 1000
@@ -597,6 +613,36 @@ function AppShell({ user, couple, onSignOut }) {
   }, [couple.id])
 
   useEffect(() => {
+    const initialRoute = { tab: tabFromHash(window.location.hash), overlay: null, date: null }
+    window.history.replaceState({ fazahub: true, ...initialRoute }, '', `#${initialRoute.tab === 'space' ? 'space' : initialRoute.tab}`)
+    setCurrentRoute(initialRoute)
+
+    function onPopState(event) {
+      const state = event.state
+      if (state?.fazahub) {
+        const nextRoute = { tab: state.tab, overlay: state.overlay || null, date: state.date || null }
+        const closedOverlay = Boolean(routeRef.current.overlay) && !nextRoute.overlay
+        if (!closedOverlay && !nextRoute.overlay && nextRoute.tab !== 'feed') {
+          nextRoute.tab = 'feed'
+          window.history.replaceState({ fazahub: true, ...nextRoute }, '', '#feed')
+        }
+        setCurrentRoute(nextRoute)
+      } else {
+        setCurrentRoute({ tab: tabFromHash(window.location.hash), overlay: null, date: null })
+      }
+    }
+    window.addEventListener('popstate', onPopState)
+    return () => window.removeEventListener('popstate', onPopState)
+  }, [])
+
+  const pushRoute = nextRoute => {
+    const normalized = { ...nextRoute, date: nextRoute.date || null, overlay: nextRoute.overlay || null }
+    if (routeRef.current.tab === normalized.tab && !normalized.overlay && !routeRef.current.overlay) return
+    window.history.pushState({ fazahub: true, ...normalized }, '', `#${normalized.tab}`)
+    setCurrentRoute(normalized)
+  }
+
+  useEffect(() => {
     loadSnaps()
     const channel = supabase.channel(`couple-snaps-${couple.id}`)
       .on('postgres_changes', { event: '*', schema: 'public', table: 'daily_snaps', filter: `couple_id=eq.${couple.id}` }, loadSnaps)
@@ -604,48 +650,148 @@ function AppShell({ user, couple, onSignOut }) {
     return () => { supabase.removeChannel(channel) }
   }, [couple.id, loadSnaps])
 
-  const filteredSnaps = selectedDate ? snaps.filter(snap => snap.snap_date === selectedDate) : snaps
+  const todaySnaps = useMemo(() => snaps.filter(snap => snap.snap_date === today), [snaps, today])
+  const todayUserCount = todaySnaps.filter(snap => snap.user_id === user.id).length
+  const streak = useMemo(() => {
+    const sharedDates = new Set()
+    const participants = new Map()
+    snaps.forEach(snap => {
+      const ids = participants.get(snap.snap_date) || new Set()
+      ids.add(snap.user_id)
+      participants.set(snap.snap_date, ids)
+    })
+    participants.forEach((ids, date) => {
+      if (ids.has(couple.partner_1_id) && ids.has(couple.partner_2_id)) sharedDates.add(date)
+    })
+    const cursor = new Date(`${today}T12:00:00`)
+    if (!sharedDates.has(today)) cursor.setDate(cursor.getDate() - 1)
+    let count = 0
+    while (sharedDates.has(localDate(cursor))) {
+      count += 1
+      cursor.setDate(cursor.getDate() - 1)
+    }
+    return count
+  }, [snaps, couple.partner_1_id, couple.partner_2_id, today])
+
+  useEffect(() => {
+    let active = true
+    const checkReminder = async () => {
+      const reminder = readReminderSettings(user.id)
+      const [hour, minute] = reminder.time.split(':').map(Number)
+      const now = new Date()
+      const isDue = reminder.enabled
+        && todayUserCount === 0
+        && now.getHours() * 60 + now.getMinutes() >= hour * 60 + minute
+      if (active) setReminderDue(isDue)
+      if (isDue) await checkLocalReminder(user.id, todayUserCount)
+    }
+    checkReminder()
+    const intervalId = window.setInterval(checkReminder, 60_000)
+    window.addEventListener('focus', checkReminder)
+    document.addEventListener('visibilitychange', checkReminder)
+    return () => {
+      active = false
+      window.clearInterval(intervalId)
+      window.removeEventListener('focus', checkReminder)
+      document.removeEventListener('visibilitychange', checkReminder)
+    }
+  }, [user.id, todayUserCount])
+
+  function openUpload() {
+    pushRoute({ tab: routeRef.current.tab, overlay: 'upload' })
+  }
+
+  function closeOverlay() {
+    if (routeRef.current.overlay) window.history.back()
+  }
+
+  async function deleteSnap(snap) {
+    if (!window.confirm('Hapus foto ini dari jurnal? Tindakan ini tidak bisa dibatalkan.')) return
+    const { error: deleteError } = await supabase.from('daily_snaps').delete()
+      .eq('id', snap.id)
+      .eq('user_id', user.id)
+    if (deleteError) setError(deleteError.message)
+    else setSnaps(current => current.filter(item => item.id !== snap.id))
+  }
+
+  async function confirmLeaveRoom() {
+    const { error: leaveError } = await supabase.rpc('leave_couple')
+    if (leaveError) throw leaveError
+    onLeaveRoom()
+  }
+
   const tabs = [
     { id: 'feed', label: 'Beranda', icon: Heart },
     { id: 'calendar', label: 'Kalender', icon: CalendarDays },
-    { id: 'settings', label: 'Ruang kita', icon: Settings }
+    { id: 'space', label: 'Ruang kita', icon: Settings }
   ]
+  const selectedSnaps = route.date ? snaps.filter(snap => snap.snap_date === route.date) : []
 
   return (
     <div className="min-h-screen bg-cream sm:py-6">
       <div className="relative mx-auto flex min-h-screen max-w-md flex-col bg-cream sm:min-h-[calc(100vh-3rem)] sm:overflow-hidden sm:rounded-[2rem] sm:border sm:border-line sm:shadow-xl">
         <header className="sticky top-0 z-20 border-b border-line/80 bg-cream/90 px-5 pb-3 pt-[max(1rem,env(safe-area-inset-top))] backdrop-blur-xl">
-          <div className="flex items-center justify-between">
-            <Brand compact />
-            <div className="flex items-center gap-2 rounded-full border border-line bg-white px-3 py-2">
-              <span className="h-2 w-2 rounded-full bg-[#86B89B]" /><span className="text-[10px] font-bold text-taupe">{couple.partner_2_id ? 'Kalian berdua' : 'Menunggu berdua'}</span>
+          <div className="flex items-center justify-between gap-3">
+            <button type="button" onClick={() => pushRoute({ tab: 'feed' })} aria-label="FazaHub, ke Beranda"><Brand compact /></button>
+            <div className="min-w-0 text-right">
+              <p className="truncate text-xs font-bold">{couple.partner_1_name}{couple.partner_2_name ? ` & ${couple.partner_2_name}` : ''}</p>
+              <p className="mt-1 text-[10px] text-taupe">{couple.partner_2_id ? `${todaySnaps.length} momen hari ini` : 'Menunggu pasangan bergabung'}</p>
             </div>
           </div>
         </header>
         <main className="flex-1 px-5 pb-28 pt-6">
           {error && <div role="alert" className="mb-4 rounded-2xl bg-[#FFF1ED] px-4 py-3 text-xs leading-5 text-[#A54D37]">{error}</div>}
-          {tab === 'feed' && <FeedView snaps={snaps} partnerName={partnerName} onAdd={() => setModalOpen(true)} loading={loading} />}
-          {tab === 'calendar' && (selectedDate
-            ? <div>
-              <button onClick={() => setSelectedDate('')} className="mb-5 inline-flex items-center gap-2 text-sm font-semibold text-taupe"><ArrowLeft size={16} /> Kembali ke kalender</button>
-              <p className="text-xs font-bold uppercase tracking-[.17em] text-terracotta">Kenangan tanggal</p>
-              <h1 className="mb-5 mt-1 text-2xl font-extrabold">{dateLabel(selectedDate)}</h1>
-              <div className="space-y-4">{filteredSnaps.map(snap => <SnapCard key={snap.id} snap={snap} partnerName={partnerName} />)}</div>
-            </div>
-            : <CalendarView snaps={snaps} onSelectDate={setSelectedDate} />)}
-          {tab === 'settings' && <SettingsView couple={couple} user={user} partnerName={partnerName} snaps={snaps} onSignOut={onSignOut} />}
+          {route.tab === 'feed' && <FeedView
+            snaps={todaySnaps}
+            partnerName={partnerName}
+            userId={user.id}
+            onAdd={openUpload}
+            onDelete={deleteSnap}
+            loading={loading}
+            streak={streak}
+            todayUserCount={todayUserCount}
+            reminderDue={reminderDue}
+          />}
+          {route.tab === 'calendar' && <CalendarView snaps={snaps} onSelectDate={date => pushRoute({ tab: 'calendar', overlay: 'day', date })} />}
+          {route.tab === 'space' && <SettingsView
+            couple={couple}
+            user={user}
+            partnerName={partnerName}
+            snaps={snaps}
+            theme={theme}
+            onThemeChange={onThemeChange}
+            onSignOut={onSignOut}
+            onLeaveRoom={confirmLeaveRoom}
+          />}
         </main>
-        <nav className="safe-bottom fixed bottom-0 left-0 right-0 z-30 mx-auto max-w-md border-t border-white/70 bg-white/85 px-7 pt-2 shadow-[0_-8px_30px_rgba(45,42,38,.06)] backdrop-blur-xl sm:absolute">
+        <nav aria-label="Navigasi utama" className="safe-bottom fixed bottom-3 left-4 right-4 z-30 mx-auto max-w-sm rounded-2xl border border-white/10 bg-zinc-900/80 px-5 pt-2 shadow-2xl backdrop-blur-xl sm:absolute">
           <div className="flex items-center justify-around">
             {tabs.map(item => {
               const Icon = item.icon
-              const active = tab === item.id
-              return <button key={item.id} onClick={() => { setTab(item.id); setSelectedDate('') }} className={`flex min-w-[72px] flex-col items-center gap-1 rounded-xl px-3 py-2 transition ${active ? 'text-terracotta' : 'text-[#A49D93]'}`}><Icon size={20} strokeWidth={active ? 2.4 : 1.8} fill={active && item.id === 'feed' ? 'currentColor' : 'none'} /><span className={`text-[10px] ${active ? 'font-extrabold' : 'font-semibold'}`}>{item.label}</span></button>
+              const active = route.tab === item.id
+              return <button key={item.id} onClick={() => pushRoute({ tab: item.id })} aria-current={active ? 'page' : undefined} className={`flex min-w-[72px] flex-col items-center gap-1 rounded-xl px-3 py-2 transition ${active ? 'text-terracotta' : 'text-[#A1A1AA]'}`}><Icon size={20} strokeWidth={active ? 2.4 : 1.8} fill={active && item.id === 'feed' ? 'currentColor' : 'none'} /><span className={`text-[10px] ${active ? 'font-extrabold' : 'font-semibold'}`}>{item.label}</span></button>
             })}
           </div>
         </nav>
       </div>
-      {modalOpen && <AddSnapModal userId={user.id} coupleId={couple.id} onClose={() => setModalOpen(false)} onSaved={() => { setModalOpen(false); setTab('feed'); setSelectedDate(''); loadSnaps() }} />}
+      {route.overlay === 'upload' && <AddSnapModal
+        userId={user.id}
+        coupleId={couple.id}
+        onClose={closeOverlay}
+        onSaved={async () => {
+          await loadSnaps()
+          pushRoute({ tab: 'feed' })
+        }}
+      />}
+      {route.overlay === 'day' && <div className="fixed inset-0 z-40 flex items-end justify-center bg-black/60 p-0 backdrop-blur-sm sm:items-center sm:p-5" onMouseDown={event => event.target === event.currentTarget && closeOverlay()}>
+        <section role="dialog" aria-modal="true" aria-labelledby="memory-date" className="max-h-[90vh] w-full max-w-md overflow-y-auto rounded-t-3xl bg-cream p-5 pb-[max(1.25rem,env(safe-area-inset-bottom))] sm:rounded-3xl">
+          <div className="mb-4 flex items-center justify-between">
+            <div><p className="text-xs font-bold uppercase tracking-widest text-terracotta">Kenangan</p><h2 id="memory-date" className="mt-1 text-xl font-extrabold">{dateLabel(route.date)}</h2></div>
+            <Button onClick={closeOverlay} className="h-10 w-10 rounded-xl bg-white text-taupe" aria-label="Tutup galeri"><X size={18} /></Button>
+          </div>
+          <div className="space-y-4">{selectedSnaps.map(snap => <SnapCard key={snap.id} snap={snap} partnerName={partnerName} canDelete={snap.user_id === user.id} onDelete={deleteSnap} />)}</div>
+        </section>
+      </div>}
     </div>
   )
 }
@@ -653,40 +799,143 @@ function AppShell({ user, couple, onSignOut }) {
 export default function App() {
   const [session, setSession] = useState(null)
   const [couple, setCouple] = useState(null)
-  const [checking, setChecking] = useState(true)
+  const [authLoading, setAuthLoading] = useState(true)
   const [coupleLoading, setCoupleLoading] = useState(false)
+  const [coupleError, setCoupleError] = useState('')
+  const [theme, setTheme] = useState(() => {
+    try {
+      return localStorage.getItem('fazahub-theme') === 'light' ? 'light' : 'dark'
+    } catch {
+      return 'dark'
+    }
+  })
+  const sessionRef = useRef(null)
 
   useEffect(() => {
-    if (!isSupabaseConfigured) { setChecking(false); return undefined }
-    supabase.auth.getSession().then(({ data }) => { setSession(data.session); setChecking(false) })
-    const { data: { subscription } } = supabase.auth.onAuthStateChange((_event, nextSession) => {
-      setSession(nextSession)
-      setCouple(null)
+    document.documentElement.dataset.theme = theme
+    document.querySelector('meta[name="theme-color"]')?.setAttribute('content', theme === 'dark' ? '#09090B' : '#FAFAFA')
+    try {
+      localStorage.setItem('fazahub-theme', theme)
+    } catch {
+      // Theme still applies for this session if storage is unavailable.
+    }
+  }, [theme])
+
+  useEffect(() => {
+    if (!isSupabaseConfigured) {
+      setAuthLoading(false)
+      return undefined
+    }
+
+    let active = true
+    let subscription
+    supabase.auth.getSession().then(({ data, error }) => {
+      if (!active) return
+      if (error) console.error('Failed to restore session:', error.message)
+      sessionRef.current = data.session
+      setSession(data.session)
+      setCoupleLoading(Boolean(data.session?.user))
+      setAuthLoading(false)
+    }).catch(error => {
+      if (!active) return
+      console.error('Failed to restore session:', error.message)
+      setAuthLoading(false)
     })
-    return () => subscription.unsubscribe()
+
+    const auth = supabase.auth.onAuthStateChange((event, nextSession) => {
+      if (event === 'TOKEN_REFRESHED') return
+      const previousUserId = sessionRef.current?.user?.id
+      const nextUserId = nextSession?.user?.id
+      if (previousUserId !== nextUserId) {
+        setCouple(null)
+        setCoupleError('')
+        setCoupleLoading(Boolean(nextUserId))
+      }
+      sessionRef.current = nextSession
+      setSession(nextSession)
+      if (event === 'SIGNED_OUT') {
+        setCouple(null)
+        setCoupleLoading(false)
+      }
+    })
+    subscription = auth.data.subscription
+
+    return () => {
+      active = false
+      subscription?.unsubscribe()
+    }
+  }, [])
+
+  const loadCouple = useCallback(async (userId, showLoading = false) => {
+    if (showLoading) setCoupleLoading(true)
+    const { data, error } = await supabase.from('couples').select('*')
+      .or(`partner_1_id.eq.${userId},partner_2_id.eq.${userId}`)
+      .maybeSingle()
+    if (error) {
+      console.error('Failed to load couple:', error.message)
+      setCoupleError(error.message)
+    } else {
+      setCouple(data)
+      setCoupleError('')
+    }
+    if (showLoading) setCoupleLoading(false)
+    return { data, error }
   }, [])
 
   useEffect(() => {
-    let active = true
-    async function loadCouple() {
-      if (!session?.user) { setCouple(null); setCoupleLoading(false); return }
-      setCoupleLoading(true)
-      const { data, error } = await supabase.from('couples').select('*')
-        .or(`partner_1_id.eq.${session.user.id},partner_2_id.eq.${session.user.id}`)
-        .maybeSingle()
-      if (!active) return
-      if (error) console.error('Failed to load couple:', error.message)
-      setCouple(data || null)
+    const userId = session?.user?.id
+    if (!userId) {
+      setCouple(null)
       setCoupleLoading(false)
+      return undefined
     }
-    loadCouple()
+
+    let active = true
+    setCoupleLoading(true)
+    supabase.from('couples').select('*')
+      .or(`partner_1_id.eq.${userId},partner_2_id.eq.${userId}`)
+      .maybeSingle()
+      .then(({ data, error }) => {
+        if (!active) return
+        if (error) {
+          console.error('Failed to load couple:', error.message)
+          setCoupleError(error.message)
+        } else {
+          setCouple(data)
+          setCoupleError('')
+        }
+        setCoupleLoading(false)
+      })
+      .catch(error => {
+        if (!active) return
+        setCoupleError(error.message || 'Ruang belum berhasil dimuat.')
+        setCoupleLoading(false)
+      })
     return () => { active = false }
   }, [session?.user?.id])
 
+  useEffect(() => {
+    if (!session?.user?.id || !couple?.id) return undefined
+    const channel = supabase.channel(`couple-membership-${couple.id}`)
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'couples', filter: `id=eq.${couple.id}` }, () => {
+        loadCouple(session.user.id, false)
+      })
+      .subscribe()
+    return () => { supabase.removeChannel(channel) }
+  }, [couple?.id, loadCouple, session?.user?.id])
+
   if (!isSupabaseConfigured) return <SetupNotice />
-  if (checking) return <main className="grid min-h-screen place-items-center bg-cream"><Loading /></main>
+  if (authLoading) return <main className="grid min-h-screen place-items-center bg-cream"><Loading /></main>
   if (!session) return <AuthScreen />
   if (coupleLoading) return <main className="grid min-h-screen place-items-center bg-cream"><Loading /></main>
+  if (coupleError && !couple) return <main className="grid min-h-screen place-items-center bg-cream px-6"><section className="max-w-md rounded-3xl border border-line bg-white p-6"><h1 className="text-xl font-extrabold">Ruang belum bisa dimuat</h1><p className="mt-2 text-sm text-taupe">{coupleError}</p><Button onClick={() => loadCouple(session.user.id, true)} className="mt-4 bg-terracotta px-4 py-3 text-sm text-white">Coba lagi</Button></section></main>
   if (!couple) return <CoupleSetup user={session.user} onComplete={setCouple} onSignOut={() => supabase.auth.signOut()} />
-  return <AppShell user={session.user} couple={couple} onSignOut={() => supabase.auth.signOut()} />
+  return <AppShell
+    user={session.user}
+    couple={couple}
+    theme={theme}
+    onThemeChange={setTheme}
+    onSignOut={() => supabase.auth.signOut()}
+    onLeaveRoom={() => { setCouple(null); setCoupleError('') }}
+  />
 }

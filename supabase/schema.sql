@@ -31,25 +31,8 @@ create table if not exists public.daily_snaps (
 create index if not exists idx_daily_snaps_couple_date
   on public.daily_snaps (couple_id, snap_date, created_at desc);
 
-create table if not exists public.push_subscriptions (
-  id uuid primary key default gen_random_uuid(),
-  user_id uuid references auth.users(id) on delete cascade not null,
-  couple_id uuid references public.couples(id) on delete cascade not null,
-  endpoint text unique not null,
-  subscription jsonb not null,
-  timezone text not null default 'UTC',
-  reminder_time time not null default time '20:00',
-  last_reminded_on date,
-  created_at timestamptz not null default now(),
-  updated_at timestamptz not null default now()
-);
-
-create index if not exists idx_push_subscriptions_reminders
-  on public.push_subscriptions (reminder_time, timezone);
-
 alter table public.couples enable row level security;
 alter table public.daily_snaps enable row level security;
-alter table public.push_subscriptions enable row level security;
 
 drop policy if exists "Users can view their own couple" on public.couples;
 create policy "Users can view their own couple" on public.couples
@@ -61,8 +44,11 @@ create policy "Authenticated users can create a couple" on public.couples
     auth.uid() = partner_1_id and partner_2_id is null and partner_2_name is null
   );
 
--- Joining is handled by join_couple below instead of a broad UPDATE policy.
+-- Invitation codes are not exposed through a policy that lists all open rooms.
+-- Joining and leaving are handled by narrowly scoped RPCs instead of broad UPDATE policies.
 drop policy if exists "Partner 2 can join an open couple" on public.couples;
+drop policy if exists "Authenticated users can find open couples" on public.couples;
+drop policy if exists "Partner 1 can delete own couple" on public.couples;
 
 drop policy if exists "Couple members can view snaps" on public.daily_snaps;
 create policy "Couple members can view snaps" on public.daily_snaps
@@ -88,35 +74,6 @@ drop policy if exists "Users can delete their own snaps" on public.daily_snaps;
 create policy "Users can delete their own snaps" on public.daily_snaps
   for delete using (auth.uid() = user_id);
 
-drop policy if exists "Users can view their own push subscriptions" on public.push_subscriptions;
-create policy "Users can view their own push subscriptions" on public.push_subscriptions
-  for select using (auth.uid() = user_id);
-
-drop policy if exists "Users can add their own push subscriptions" on public.push_subscriptions;
-create policy "Users can add their own push subscriptions" on public.push_subscriptions
-  for insert with check (
-    auth.uid() = user_id and exists (
-      select 1 from public.couples
-      where couples.id = push_subscriptions.couple_id
-        and (couples.partner_1_id = auth.uid() or couples.partner_2_id = auth.uid())
-    )
-  );
-
-drop policy if exists "Users can update their own push subscriptions" on public.push_subscriptions;
-create policy "Users can update their own push subscriptions" on public.push_subscriptions
-  for update using (auth.uid() = user_id)
-  with check (
-    auth.uid() = user_id and exists (
-      select 1 from public.couples
-      where couples.id = push_subscriptions.couple_id
-        and (couples.partner_1_id = auth.uid() or couples.partner_2_id = auth.uid())
-    )
-  );
-
-drop policy if exists "Users can remove their own push subscriptions" on public.push_subscriptions;
-create policy "Users can remove their own push subscriptions" on public.push_subscriptions
-  for delete using (auth.uid() = user_id);
-
 create or replace function public.join_couple(p_invite_code text, p_partner_name text)
 returns uuid
 language plpgsql
@@ -131,6 +88,12 @@ begin
   end if;
   if length(trim(p_partner_name)) not between 1 and 50 then
     raise exception 'Nama panggilan harus berisi 1 sampai 50 karakter.';
+  end if;
+  if exists (
+    select 1 from public.couples
+    where partner_1_id = auth.uid() or partner_2_id = auth.uid()
+  ) then
+    raise exception 'Akun ini sudah terhubung ke ruang lain. Keluar dari ruang tersebut terlebih dahulu.';
   end if;
 
   update public.couples
@@ -149,6 +112,37 @@ $$;
 
 revoke all on function public.join_couple(text, text) from public;
 grant execute on function public.join_couple(text, text) to authenticated;
+
+create or replace function public.leave_couple()
+returns boolean
+language plpgsql
+security definer
+set search_path = ''
+as $$
+declare
+  current_user_id uuid := auth.uid();
+  removed_count integer;
+begin
+  if current_user_id is null then
+    raise exception 'Kamu harus masuk terlebih dahulu.';
+  end if;
+
+  delete from public.couples where partner_1_id = current_user_id;
+  get diagnostics removed_count = row_count;
+  if removed_count > 0 then return true; end if;
+
+  update public.couples
+    set partner_2_id = null, partner_2_name = null
+    where partner_2_id = current_user_id;
+  get diagnostics removed_count = row_count;
+  if removed_count > 0 then return true; end if;
+
+  raise exception 'Akun ini tidak sedang berada di ruang pasangan.';
+end;
+$$;
+
+revoke all on function public.leave_couple() from public;
+grant execute on function public.leave_couple() to authenticated;
 
 -- Enable replication only if these tables have not already been added.
 do $$
