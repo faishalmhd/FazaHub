@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
   ArrowRight, Bell, CalendarDays, Camera, Check, ChevronLeft, ChevronRight,
-  Download, Heart, ImagePlus, LogOut, MessageCircle, MessageSquare, Mic, MicOff, Phone, PhoneOff, Plus, Send, Settings, Sparkles, Trash2, Upload, Video, VideoOff, X
+  Download, Heart, ImagePlus, LogOut, MessageCircle, MessageSquare, Mic, MicOff, Phone, PhoneOff, Plus, Send, Settings, Sparkles, Trash2, Upload, Video, VideoOff, Volume2, X
 } from 'lucide-react'
 import { isSupabaseConfigured, supabase } from './lib/supabase'
 import { uploadImage, optimizedImage } from './lib/cloudinary'
@@ -9,6 +9,7 @@ import { exportJournal } from './lib/exportJournal'
 import { compressImage } from './utils/compressImage'
 import { checkLocalReminder, downloadCalendarAlarm, readReminderSettings, saveReminderSettings, showTestReminder } from './utils/reminder'
 import { readMessageNotificationSettings, requestMessageNotificationPermission, saveMessageNotificationSettings, showIncomingMessageNotification } from './utils/messageNotifications'
+import { playIphoneMessageTone, playIphoneTestSounds, startIphoneRingback, startIphoneRingtone, stopIphoneRingback, stopIphoneRingtone } from './utils/iphoneSounds'
 
 const moods = [
   { label: 'Happy', emoji: '☀️' },
@@ -359,6 +360,8 @@ function SettingsView({ couple, user, partnerName, snaps, theme, onThemeChange, 
   const [messageNotifications, setMessageNotifications] = useState(() => readMessageNotificationSettings(user.id))
   const [messageNotificationError, setMessageNotificationError] = useState('')
   const [messageNotificationBusy, setMessageNotificationBusy] = useState(false)
+  const [soundTestBusy, setSoundTestBusy] = useState(false)
+  const [soundTestError, setSoundTestError] = useState('')
   const [notificationPermission, setNotificationPermission] = useState(() => 'Notification' in window ? Notification.permission : 'unsupported')
   const isPartner1 = couple.partner_1_id === user.id
   const myName = isPartner1 ? couple.partner_1_name : couple.partner_2_name
@@ -402,6 +405,19 @@ function SettingsView({ couple, user, partnerName, snaps, theme, onThemeChange, 
       setMessageNotificationError(error.message || 'Notifikasi pesan gagal diaktifkan.')
     } finally {
       setMessageNotificationBusy(false)
+    }
+  }
+
+  async function testIphoneSounds() {
+    if (soundTestBusy) return
+    setSoundTestBusy(true)
+    setSoundTestError('')
+    try {
+      await playIphoneTestSounds()
+    } catch (error) {
+      setSoundTestError(error.message || 'Nada dering tidak dapat diputar di browser ini.')
+    } finally {
+      setSoundTestBusy(false)
     }
   }
 
@@ -510,8 +526,12 @@ function SettingsView({ couple, user, partnerName, snaps, theme, onThemeChange, 
         </Button>
         {notificationPermission === 'denied' && <p className="mt-3 text-[11px] leading-5 text-taupe">Izin saat ini diblokir oleh browser. Ubah izin notifikasi FazaHub di pengaturan browser atau perangkat, lalu aktifkan kembali di sini.</p>}
         {notificationPermission === 'unsupported' && <p className="mt-3 text-[11px] leading-5 text-taupe">Browser ini belum mendukung notifikasi web.</p>}
-        <p className="mt-3 text-[11px] leading-5 text-taupe">Notifikasi pesan memerlukan izin dan koneksi FazaHub tetap berjalan di browser atau PWA. Pesan tidak menampilkan isi chat pada layar kunci.</p>
+        <p className="mt-3 text-[11px] leading-5 text-taupe">Notifikasi pesan memerlukan izin dan koneksi FazaHub tetap berjalan di browser atau PWA. Nada suara hanya dapat diputar jika browser masih menjalankan aplikasi dan mengizinkan audio. Pesan tidak menampilkan isi chat pada layar kunci.</p>
         {messageNotificationError && <p role="alert" className="mt-3 text-xs leading-5 text-[#A54D37]">{messageNotificationError}</p>}
+        <Button type="button" onClick={testIphoneSounds} disabled={soundTestBusy} className="mt-3 w-full border border-line bg-white px-4 py-2.5 text-xs text-charcoal">
+          <Volume2 size={15} />{soundTestBusy ? 'Memutar nada dering dan pesan...' : 'Tes Nada Dering iPhone'}
+        </Button>
+        {soundTestError && <p role="alert" className="mt-2 text-xs leading-5 text-[#A54D37]">{soundTestError}</p>}
       </div>
       <div className="mt-4 rounded-3xl border border-line bg-white p-5 shadow-soft">
         <div className="flex items-start gap-3">
@@ -618,7 +638,7 @@ function AddSnapModal({ userId, coupleId, onClose, onSaved }) {
         </div>
         <form onSubmit={submit} className="mt-5 space-y-4">
           <input ref={galleryInputRef} type="file" accept="image/jpeg,image/png,image/webp,image/heic" onChange={chooseFile} className="hidden" />
-          <input ref={cameraInputRef} type="file" accept="image/*" capture="environment" onChange={chooseFile} className="hidden" />
+          <input ref={cameraInputRef} type="file" accept="image/*" onChange={chooseFile} className="hidden" />
           {preview && <div className="relative aspect-[4/3] overflow-hidden rounded-2xl bg-black/5"><img src={preview} alt="Pratinjau foto" className="absolute inset-0 h-full w-full object-cover" /></div>}
           <div className="grid grid-cols-2 gap-3">
             <Button type="button" onClick={() => galleryInputRef.current?.click()} className="border border-line bg-white px-3 py-3 text-xs text-charcoal"><ImagePlus size={16} />{preview ? 'Ganti dari galeri' : 'Pilih dari Galeri'}</Button>
@@ -784,9 +804,11 @@ function VideoCall({ user, couple }) {
   const signalHandlerRef = useRef(null)
   const callErrorHandlerRef = useRef(null)
   const videoTransceiverRef = useRef(null)
+  const remoteStreamRef = useRef(null)
   const remoteVideoRef = useRef(null)
-  const remoteAudioRef = useRef(null)
   const localVideoRef = useRef(null)
+  const [localVideoTrack, setLocalVideoTrack] = useState(null)
+  const [remoteVideoTrack, setRemoteVideoTrack] = useState(null)
   const partnerId = user.id === couple.partner_1_id ? couple.partner_2_id : couple.partner_1_id
   const partnerDisplayName = user.id === couple.partner_1_id ? couple.partner_2_name : couple.partner_1_name
 
@@ -810,8 +832,28 @@ function VideoCall({ user, couple }) {
     videoTransceiverRef.current = null
     localStreamRef.current?.getTracks().forEach(track => track.stop())
     localStreamRef.current = null
+    remoteStreamRef.current = null
+    setLocalVideoTrack(null)
+    setRemoteVideoTrack(null)
     updateCall({ phase: 'idle', callId: null, error: message, notice: '', connectedAt: null, localStream: null, remoteStream: null })
   }
+
+  useEffect(() => {
+    if (call.phase === 'incoming') {
+      startIphoneRingtone()
+      stopIphoneRingback()
+    } else if (call.phase === 'calling') {
+      stopIphoneRingtone()
+      startIphoneRingback()
+    } else {
+      stopIphoneRingtone()
+      stopIphoneRingback()
+    }
+    return () => {
+      stopIphoneRingtone()
+      stopIphoneRingback()
+    }
+  }, [call.callId, call.phase])
 
   function showCallError(error, callId = callRef.current.callId) {
     if (!callId || callRef.current.callId !== callId) return
@@ -954,7 +996,10 @@ function VideoCall({ user, couple }) {
       throw new Error('Panggilan video memerlukan koneksi HTTPS dan browser yang mendukung kamera.')
     }
     try {
-      const stream = await navigator.mediaDevices.getUserMedia({ audio: true, video: true })
+      const stream = await navigator.mediaDevices.getUserMedia({
+        audio: true,
+        video: { facingMode: 'user', width: { ideal: 1280 }, height: { ideal: 720 } }
+      })
       return { stream, notice: '' }
     } catch (error) {
       if (error?.name !== 'NotReadableError' && error?.name !== 'NotFoundError') throw error
@@ -1029,22 +1074,20 @@ function VideoCall({ user, couple }) {
       }
     }
     peerConnection.ontrack = event => {
-      const remoteStream = event.streams[0] || new MediaStream([event.track])
+      const remoteStream = event.streams[0] || remoteStreamRef.current || new MediaStream()
+      if (!remoteStream.getTracks().some(track => track.id === event.track.id)) remoteStream.addTrack(event.track)
+      remoteStreamRef.current = remoteStream
+      if (event.track.kind === 'video') setRemoteVideoTrack(event.track)
       updateCall(state => state.callId === callId ? { ...state, remoteStream } : state)
       if (remoteVideoRef.current) {
         remoteVideoRef.current.srcObject = remoteStream
         remoteVideoRef.current.play().catch(() => {})
-      }
-      if (remoteAudioRef.current) {
-        remoteAudioRef.current.srcObject = remoteStream
-        remoteAudioRef.current.play().catch(() => {})
       }
       event.track.onunmute = () => {
         updateCall(state => state.callId === callId
           ? { ...state, remoteStream: new MediaStream(remoteStream.getTracks()) }
           : state)
         remoteVideoRef.current?.play().catch(() => {})
-        remoteAudioRef.current?.play().catch(() => {})
       }
     }
     peerConnection.onconnectionstatechange = () => {
@@ -1199,15 +1242,14 @@ function VideoCall({ user, couple }) {
 
   useEffect(() => {
     if (remoteVideoRef.current) {
-      remoteVideoRef.current.srcObject = call.remoteStream || null
+      remoteVideoRef.current.srcObject = remoteStreamRef.current || call.remoteStream || null
       if (call.remoteStream) remoteVideoRef.current.play().catch(() => {})
     }
-    if (remoteAudioRef.current) {
-      remoteAudioRef.current.srcObject = call.remoteStream || null
-      if (call.remoteStream) remoteAudioRef.current.play().catch(() => {})
+    if (localVideoRef.current) {
+      localVideoRef.current.srcObject = localStreamRef.current || call.localStream || null
+      if (call.localStream) localVideoRef.current.play().catch(() => {})
     }
-    if (localVideoRef.current) localVideoRef.current.srcObject = call.localStream || null
-  }, [call.localStream, call.remoteStream, call.videoDisabled])
+  }, [call.localStream, call.remoteStream, call.videoDisabled, call.phase, localVideoTrack, remoteVideoTrack])
 
   useEffect(() => {
     if (!call.connectedAt) return undefined
@@ -1234,6 +1276,7 @@ function VideoCall({ user, couple }) {
         return
       }
       localStreamRef.current = localStream
+      setLocalVideoTrack(localStream.getVideoTracks()[0] || null)
       const peerConnection = makePeerConnection(callId, localStream, iceServers)
       updateCall(state => ({
         ...state,
@@ -1269,6 +1312,7 @@ function VideoCall({ user, couple }) {
         return
       }
       localStreamRef.current = localStream
+      setLocalVideoTrack(localStream.getVideoTracks()[0] || null)
       const peerConnection = makePeerConnection(callId, localStream, iceServers)
       updateCall(state => ({
         ...state,
@@ -1305,6 +1349,7 @@ function VideoCall({ user, couple }) {
     if (videoTracks.length) {
       const enable = !videoTracks.some(track => track.enabled)
       videoTracks.forEach(track => { track.enabled = enable })
+      setLocalVideoTrack(videoTracks[0] || null)
       updateCall(state => ({ ...state, videoDisabled: !enable, error: '' }))
       return
     }
@@ -1312,7 +1357,10 @@ function VideoCall({ user, couple }) {
     let cameraTrack
     try {
       if (!navigator.mediaDevices?.getUserMedia) throw new Error('Browser ini tidak mendukung akses kamera.')
-      const cameraStream = await navigator.mediaDevices.getUserMedia({ audio: false, video: true })
+      const cameraStream = await navigator.mediaDevices.getUserMedia({
+        audio: false,
+        video: { facingMode: 'user', width: { ideal: 1280 }, height: { ideal: 720 } }
+      })
       cameraTrack = cameraStream.getVideoTracks()[0]
       const transceiver = videoTransceiverRef.current
       if (!cameraTrack || !transceiver || callRef.current.callId !== callId || localStreamRef.current !== stream) {
@@ -1327,7 +1375,9 @@ function VideoCall({ user, couple }) {
         return
       }
       localStreamRef.current.addTrack(cameraTrack)
+      setLocalVideoTrack(cameraTrack)
       cameraTrack.onended = () => {
+        setLocalVideoTrack(null)
         updateCall(state => state.callId === callId
           ? { ...state, videoDisabled: true, notice: 'Kamera terputus. Panggilan suara tetap aktif.' }
           : state)
@@ -1387,17 +1437,11 @@ function VideoCall({ user, couple }) {
               ? <div role="alert" className="max-w-sm px-6 text-center"><div className="mx-auto grid h-16 w-16 place-items-center rounded-full bg-rose-950 text-rose-300"><PhoneOff size={26} /></div><p className="mt-4 text-base font-semibold leading-6 text-rose-100">{call.error}</p><p className="mt-2 text-xs text-zinc-400">Menutup panggilan sebentar lagi...</p></div>
               : isIncoming
               ? <div className="text-center"><div className="mx-auto grid h-20 w-20 place-items-center rounded-full bg-zinc-800 text-rose-300"><Phone size={32} /></div><p className="mt-4 text-lg font-bold">Panggilan video masuk</p><p className="mt-1 text-sm text-zinc-400">dari {partnerDisplayName || 'pasanganmu'}</p></div>
-              : call.remoteStream
-                ? <>
-                  <video ref={remoteVideoRef} autoPlay playsInline muted className="h-full w-full object-contain" />
-                  <audio ref={remoteAudioRef} autoPlay playsInline className="hidden" />
-                  {!call.remoteStream.getVideoTracks().some(track => track.readyState === 'live') && <p className="absolute rounded-xl bg-black/70 px-4 py-2 text-sm text-zinc-200">Menunggu kamera pasangan...</p>}
-                </>
                 : <>
-                  <div className="text-center text-sm text-zinc-400"><Video size={28} className="mx-auto mb-3 opacity-60" />Menunggu video pasangan...</div>
-                  <audio ref={remoteAudioRef} autoPlay playsInline className="hidden" />
-                </>}
-            {!isIncoming && !isError && call.localStream?.getVideoTracks().length > 0 && <video ref={localVideoRef} autoPlay playsInline muted className="absolute bottom-4 right-4 aspect-[3/4] w-24 rounded-2xl border border-white/20 bg-zinc-800 object-cover shadow-xl sm:bottom-6 sm:right-6 sm:w-32" />}
+                    <video ref={remoteVideoRef} autoPlay playsInline className="absolute inset-0 h-full w-full object-cover" />
+                    {(!call.remoteStream || !call.remoteStream.getVideoTracks().some(track => track.readyState === 'live')) && <p className="z-10 rounded-xl bg-black/70 px-4 py-2 text-center text-sm text-zinc-200"><Video size={20} className="mx-auto mb-2 opacity-70" />Menunggu kamera pasangan...</p>}
+                  </>}
+            {!isIncoming && !isError && localVideoTrack && <video ref={localVideoRef} autoPlay playsInline muted className="absolute bottom-4 right-4 aspect-[3/4] w-24 scale-x-[-1] rounded-2xl border border-white/20 bg-zinc-800 object-cover shadow-xl sm:bottom-6 sm:right-6 sm:w-32" />}
             {call.notice && call.phase !== 'error' && <p role="status" className="absolute bottom-3 left-3 right-3 rounded-xl bg-black/70 px-3 py-2 text-center text-xs text-zinc-200">{call.notice}</p>}
           </div>
           <footer className="safe-bottom flex items-center justify-center gap-4 px-4 pb-5 pt-4">
@@ -1522,6 +1566,9 @@ function AppShell({ user, couple, theme, onThemeChange, onSignOut, onLeaveRoom }
   const handleNewMessage = useCallback(payload => {
     const message = payload.new
     if (!message) return
+    if (message.user_id !== user.id) {
+      playIphoneMessageTone()
+    }
     if (message.user_id !== user.id && !(document.visibilityState === 'visible' && routeRef.current.tab === 'chat')) {
       const senderName = message.user_id === couple.partner_1_id ? couple.partner_1_name : couple.partner_2_name || 'Pasangan'
       showIncomingMessageNotification(user.id, couple.id, senderName).catch(notificationError => {
