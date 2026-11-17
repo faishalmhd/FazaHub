@@ -717,13 +717,17 @@ function ChatView({ messages, user, partnerName, loading, onSend }) {
 }
 
 function VideoCall({ user, couple }) {
-  const [call, setCall] = useState({ phase: 'idle', error: '', localStream: null, remoteStream: null })
+  const [call, setCall] = useState({ phase: 'idle', error: '', notice: '', localStream: null, remoteStream: null })
   const [realtimeReady, setRealtimeReady] = useState(false)
   const [connectionError, setConnectionError] = useState('')
   const channelRef = useRef(null)
   const callRef = useRef(call)
+  const peerConnectionRef = useRef(null)
+  const localStreamRef = useRef(null)
+  const callErrorTimerRef = useRef(null)
   const readyRef = useRef(false)
   const signalHandlerRef = useRef(null)
+  const callErrorHandlerRef = useRef(null)
   const remoteVideoRef = useRef(null)
   const localVideoRef = useRef(null)
   const partnerId = user.id === couple.partner_1_id ? couple.partner_2_id : couple.partner_1_id
@@ -736,11 +740,49 @@ function VideoCall({ user, couple }) {
   }
 
   function releaseCall(message = '') {
-    const current = callRef.current
-    current.peerConnection?.close()
-    current.localStream?.getTracks().forEach(track => track.stop())
-    updateCall({ phase: 'idle', error: message, localStream: null, remoteStream: null })
+    window.clearTimeout(callErrorTimerRef.current)
+    callErrorTimerRef.current = null
+    peerConnectionRef.current?.close()
+    peerConnectionRef.current = null
+    localStreamRef.current?.getTracks().forEach(track => track.stop())
+    localStreamRef.current = null
+    updateCall({ phase: 'idle', callId: null, error: message, notice: '', localStream: null, remoteStream: null })
   }
+
+  function showCallError(error, callId = callRef.current.callId) {
+    if (!callId || callRef.current.callId !== callId) return
+    const name = error?.name || 'Error'
+    const message = error?.message || ''
+    let displayMessage
+    if (name === 'NotAllowedError' || name === 'PermissionDeniedError' || name === 'SecurityError') {
+      displayMessage = 'Izin kamera/mikrofon ditolak. Izinkan akses di pengaturan browser, lalu coba lagi.'
+    } else if (name === 'NotReadableError') {
+      displayMessage = 'Kamera atau mikrofon sedang dipakai aplikasi/tab lain. Tutup aplikasi tersebut, lalu coba lagi.'
+    } else if (name === 'NotFoundError') {
+      displayMessage = 'Kamera atau mikrofon tidak ditemukan. Periksa perangkat, lalu coba lagi.'
+    } else if (name === 'AbortError') {
+      displayMessage = 'Akses kamera/mikrofon terhenti. Periksa perangkat lalu coba lagi.'
+    } else if (name === 'OverconstrainedError') {
+      displayMessage = 'Kamera tidak mendukung pengaturan yang diminta. Periksa perangkat lalu coba lagi.'
+    } else if (name === 'OperationError' || /channel|realtime|sinyal/i.test(message)) {
+      displayMessage = 'Gagal terhubung ke server sinyal. Periksa koneksi internet dan Realtime Supabase.'
+    } else {
+      displayMessage = message ? `Panggilan gagal (${name}): ${message}` : `Panggilan gagal (${name}). Coba lagi.`
+    }
+
+    peerConnectionRef.current?.close()
+    peerConnectionRef.current = null
+    localStreamRef.current?.getTracks().forEach(track => track.stop())
+    localStreamRef.current = null
+    updateCall(state => state.callId === callId
+      ? { ...state, phase: 'error', error: displayMessage, localStream: null, remoteStream: null }
+      : state)
+    window.clearTimeout(callErrorTimerRef.current)
+    callErrorTimerRef.current = window.setTimeout(() => {
+      if (callRef.current.callId === callId) releaseCall()
+    }, 4000)
+  }
+  callErrorHandlerRef.current = showCallError
 
   const sendSignal = useCallback(async (kind, callId, data = null) => {
     const channel = channelRef.current
@@ -748,36 +790,62 @@ function VideoCall({ user, couple }) {
     const status = await channel.send({
       type: 'broadcast',
       event: 'call_signal',
-      payload: { from: user.id, callId, kind, data }
+      payload: { from: user.id, callId, kind, data, createdAt: Date.now() }
     })
     if (status !== 'ok') throw new Error('Sinyal panggilan gagal dikirim. Periksa koneksi lalu coba lagi.')
   }, [user.id])
 
   const requestIceServers = useCallback(async () => {
-    const { data: sessionData, error: sessionError } = await supabase.auth.getSession()
-    if (sessionError) throw sessionError
-    const accessToken = sessionData.session?.access_token
-    if (!accessToken) throw new Error('Sesi login berakhir. Masuk kembali untuk menelepon.')
+    const iceServers = [{ urls: 'stun:stun.l.google.com:19302' }]
+    const turnUrls = String(import.meta.env.VITE_TURN_URL || '').split(',').map(url => url.trim()).filter(url => /^turns?:/i.test(url))
+    const turnUsername = String(import.meta.env.VITE_TURN_USERNAME || '').trim()
+    const turnCredential = String(import.meta.env.VITE_TURN_CREDENTIAL || '').trim()
+    if (turnUrls.length && turnUsername && turnCredential) {
+      iceServers.push({ urls: turnUrls, username: turnUsername, credential: turnCredential })
+    }
 
-    const response = await fetch('/api/turn-credentials', {
-      method: 'POST',
-      headers: { Authorization: `Bearer ${accessToken}` }
-    })
-    const result = await response.json().catch(() => ({}))
-    if (!response.ok) throw new Error(result.error || 'Server TURN belum siap. Periksa konfigurasi panggilan.')
-    if (!Array.isArray(result.iceServers) || !result.iceServers.length) throw new Error('Server TURN belum memberikan kredensial.')
-    return result.iceServers
+    try {
+      const { data: sessionData } = await supabase.auth.getSession()
+      const accessToken = sessionData.session?.access_token
+      if (!accessToken) return { iceServers, notice: 'Server relay tidak tersedia; mencoba koneksi langsung.' }
+
+      const response = await fetch('/api/turn-credentials', {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${accessToken}` }
+      })
+      if (!response.ok) return { iceServers, notice: 'Server relay tidak tersedia; mencoba koneksi langsung.' }
+      const result = await response.json()
+      if (!Array.isArray(result.iceServers) || !result.iceServers.length) {
+        return { iceServers, notice: 'Server relay tidak tersedia; mencoba koneksi langsung.' }
+      }
+      return { iceServers: [...iceServers, ...result.iceServers], notice: '' }
+    } catch (error) {
+      console.warn('FazaHub TURN credentials unavailable; using configured ICE servers.', error)
+      return { iceServers, notice: 'Server relay tidak tersedia; mencoba koneksi langsung.' }
+    }
   }, [])
 
   async function requestMediaStream() {
     if (!navigator.mediaDevices?.getUserMedia) {
       throw new Error('Panggilan video memerlukan koneksi HTTPS dan browser yang mendukung kamera.')
     }
-    return navigator.mediaDevices.getUserMedia({ audio: true, video: true })
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true, video: true })
+      return { stream, notice: '' }
+    } catch (error) {
+      if (error?.name !== 'NotReadableError' && error?.name !== 'NotFoundError') throw error
+      try {
+        const stream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false })
+        return { stream, notice: 'Kamera sibuk atau tidak tersedia, melanjutkan dengan suara.' }
+      } catch (audioError) {
+        throw audioError
+      }
+    }
   }
 
   const makePeerConnection = useCallback((callId, stream, iceServers) => {
     const peerConnection = new RTCPeerConnection({ iceServers })
+    peerConnectionRef.current = peerConnection
     stream.getTracks().forEach(track => peerConnection.addTrack(track, stream))
     peerConnection.onicecandidate = event => {
       if (!event.candidate) return
@@ -789,7 +857,7 @@ function VideoCall({ user, couple }) {
         return
       }
       sendSignal('candidate', callId, candidate).catch(error => {
-        updateCall(state => state.callId === callId ? { ...state, error: error.message } : state)
+        callErrorHandlerRef.current?.(error, callId)
       })
     }
     peerConnection.ontrack = event => {
@@ -800,7 +868,7 @@ function VideoCall({ user, couple }) {
       if (peerConnection.connectionState === 'connected') {
         updateCall(state => state.callId === callId ? { ...state, phase: 'active', error: '' } : state)
       } else if (peerConnection.connectionState === 'failed') {
-        updateCall(state => state.callId === callId ? { ...state, error: 'Koneksi video gagal. Coba akhiri panggilan lalu telepon kembali.' } : state)
+        callErrorHandlerRef.current?.(new Error('Koneksi video gagal. Periksa jaringan, kamera, atau server relay.'), callId)
       }
     }
     return peerConnection
@@ -823,7 +891,9 @@ function VideoCall({ user, couple }) {
   }
 
   const handleSignal = useCallback(async signal => {
-    if (!signal || signal.from !== partnerId || typeof signal.callId !== 'string' || typeof signal.kind !== 'string') return
+    if (!signal || signal.from === user.id || signal.from !== partnerId
+      || typeof signal.callId !== 'string' || typeof signal.kind !== 'string'
+      || !Number.isFinite(signal.createdAt) || Date.now() - signal.createdAt > 15_000) return
     const current = callRef.current
 
     if (signal.kind === 'offer') {
@@ -857,13 +927,13 @@ function VideoCall({ user, couple }) {
         updateCall(state => ({ ...state, pendingRemoteCandidates: [...(state.pendingRemoteCandidates || []), signal.data] }))
       }
     } else if (signal.kind === 'busy') {
-      releaseCall(`${partnerDisplayName || 'Pasangan'} sedang menerima panggilan lain.`)
+      showCallError(new Error(`${partnerDisplayName || 'Pasangan'} sedang menerima panggilan lain.`), signal.callId)
     } else if (signal.kind === 'reject') {
-      releaseCall(`${partnerDisplayName || 'Pasangan'} belum bisa menerima panggilan.`)
+      showCallError(new Error(`${partnerDisplayName || 'Pasangan'} belum bisa menerima panggilan.`), signal.callId)
     } else if (signal.kind === 'hangup') {
-      releaseCall('Panggilan telah berakhir.')
+      showCallError(new Error('Pasangan mengakhiri panggilan.'), signal.callId)
     }
-  }, [flushRemoteCandidates, partnerDisplayName, partnerId, releaseCall, sendSignal])
+  }, [flushRemoteCandidates, partnerDisplayName, partnerId, releaseCall, sendSignal, user.id])
 
   signalHandlerRef.current = signal => handleSignal(signal)
 
@@ -872,7 +942,9 @@ function VideoCall({ user, couple }) {
     const channel = supabase.channel(`couple:${couple.id}:calls`, { config: { private: true } })
       .on('broadcast', { event: 'call_signal' }, ({ payload }) => {
         signalHandlerRef.current?.(payload).catch(error => {
-          if (active) setConnectionError(error.message || 'Sinyal panggilan gagal diproses.')
+          if (!active) return
+          if (callRef.current.phase !== 'idle') callErrorHandlerRef.current?.(error)
+          else setConnectionError(error.message || 'Sinyal panggilan gagal diproses.')
         })
       })
       .subscribe(status => {
@@ -881,8 +953,10 @@ function VideoCall({ user, couple }) {
         readyRef.current = connected
         setRealtimeReady(connected)
         if (connected) setConnectionError('')
-        else if (status === 'CHANNEL_ERROR' || status === 'TIMED_OUT') {
-          setConnectionError('Koneksi panggilan tidak tersedia. Periksa Realtime Supabase dan kebijakan SQL.')
+        else if (status === 'CHANNEL_ERROR' || status === 'TIMED_OUT' || status === 'CLOSED') {
+          const error = new Error('Gagal terhubung ke server sinyal Supabase. Periksa koneksi Realtime dan kebijakan SQL.')
+          if (callRef.current.phase !== 'idle') callErrorHandlerRef.current?.(error)
+          else setConnectionError(error.message)
         }
       })
     channelRef.current = channel
@@ -891,9 +965,11 @@ function VideoCall({ user, couple }) {
       active = false
       readyRef.current = false
       channelRef.current = null
-      const current = callRef.current
-      current.peerConnection?.close()
-      current.localStream?.getTracks().forEach(track => track.stop())
+      window.clearTimeout(callErrorTimerRef.current)
+      peerConnectionRef.current?.close()
+      peerConnectionRef.current = null
+      localStreamRef.current?.getTracks().forEach(track => track.stop())
+      localStreamRef.current = null
       supabase.removeChannel(channel)
     }
   }, [couple.id])
@@ -909,22 +985,29 @@ function VideoCall({ user, couple }) {
     const callId = crypto.randomUUID()
     updateCall({ phase: 'preparing', callId, pendingRemoteCandidates: [], pendingLocalCandidates: [], signalReady: false, error: '' })
     try {
-      const iceServers = await requestIceServers()
-      if (callRef.current.callId !== callId) return
-      const localStream = await requestMediaStream()
-      if (callRef.current.callId !== callId) {
+      const { iceServers, notice: iceNotice } = await requestIceServers()
+      if (callRef.current.callId !== callId || callRef.current.phase === 'error') return
+      const { stream: localStream, notice: mediaNotice } = await requestMediaStream()
+      if (callRef.current.callId !== callId || callRef.current.phase === 'error') {
         localStream.getTracks().forEach(track => track.stop())
         return
       }
+      localStreamRef.current = localStream
       const peerConnection = makePeerConnection(callId, localStream, iceServers)
-      updateCall(state => ({ ...state, peerConnection, localStream }))
+      updateCall(state => ({
+        ...state,
+        peerConnection,
+        localStream,
+        videoDisabled: localStream.getVideoTracks().length === 0,
+        notice: [iceNotice, mediaNotice].filter(Boolean).join(' ')
+      }))
       const offer = await peerConnection.createOffer()
       await peerConnection.setLocalDescription(offer)
       await sendSignal('offer', callId, peerConnection.localDescription.toJSON())
       await flushLocalCandidates(callId)
       updateCall(state => ({ ...state, phase: 'calling' }))
     } catch (error) {
-      releaseCall(error.message || 'Panggilan gagal dimulai. Periksa izin kamera dan mikrofon.')
+      showCallError(error, callId)
     }
   }
 
@@ -934,15 +1017,22 @@ function VideoCall({ user, couple }) {
     const callId = current.callId
     updateCall(state => ({ ...state, phase: 'preparing', error: '' }))
     try {
-      const iceServers = await requestIceServers()
-      if (callRef.current.callId !== callId) return
-      const localStream = await requestMediaStream()
-      if (callRef.current.callId !== callId) {
+      const { iceServers, notice: iceNotice } = await requestIceServers()
+      if (callRef.current.callId !== callId || callRef.current.phase === 'error') return
+      const { stream: localStream, notice: mediaNotice } = await requestMediaStream()
+      if (callRef.current.callId !== callId || callRef.current.phase === 'error') {
         localStream.getTracks().forEach(track => track.stop())
         return
       }
+      localStreamRef.current = localStream
       const peerConnection = makePeerConnection(callId, localStream, iceServers)
-      updateCall(state => ({ ...state, peerConnection, localStream }))
+      updateCall(state => ({
+        ...state,
+        peerConnection,
+        localStream,
+        videoDisabled: localStream.getVideoTracks().length === 0,
+        notice: [iceNotice, mediaNotice].filter(Boolean).join(' ')
+      }))
       await peerConnection.setRemoteDescription(new RTCSessionDescription(current.offer))
       await flushRemoteCandidates(peerConnection)
       const answer = await peerConnection.createAnswer()
@@ -951,31 +1041,34 @@ function VideoCall({ user, couple }) {
       await flushLocalCandidates(callId)
       updateCall(state => ({ ...state, phase: 'connecting' }))
     } catch (error) {
-      releaseCall(error.message || 'Panggilan gagal dijawab. Periksa izin kamera dan mikrofon.')
+      showCallError(error, callId)
     }
   }
 
   async function endCall(kind = 'hangup') {
     const current = callRef.current
-    if (current.callId && (current.phase === 'incoming' || current.peerConnection)) {
+    if (current.callId && (current.phase === 'incoming' || peerConnectionRef.current)) {
       try { await sendSignal(kind, current.callId) } catch (error) { setConnectionError(error.message) }
     }
     releaseCall()
   }
 
   function toggleTrack(type) {
-    const stream = callRef.current.localStream
+    const stream = localStreamRef.current
     if (!stream) return
     const tracks = type === 'audio' ? stream.getAudioTracks() : stream.getVideoTracks()
+    if (!tracks.length) return
     const enabled = tracks.some(track => !track.enabled)
     tracks.forEach(track => { track.enabled = enabled })
     updateCall(state => ({ ...state, [type === 'audio' ? 'muted' : 'videoDisabled']: !enabled }))
   }
 
   const isIncoming = call.phase === 'incoming'
+  const isError = call.phase === 'error'
   const callStatus = call.phase === 'preparing' ? 'Menyiapkan kamera dan koneksi...'
     : call.phase === 'calling' ? `Memanggil ${partnerDisplayName || 'pasangan'}...`
       : call.phase === 'active' ? 'Panggilan tersambung'
+        : isError ? 'Panggilan berhenti'
         : isIncoming ? `${partnerDisplayName || 'Pasangan'} menelepon...`
           : 'Menghubungkan panggilan...'
 
@@ -995,20 +1088,23 @@ function VideoCall({ user, couple }) {
             {call.error && <p role="alert" className="max-w-[55%] text-right text-xs text-rose-300">{call.error}</p>}
           </header>
           <div className="relative flex min-h-0 flex-1 items-center justify-center overflow-hidden bg-zinc-900">
-            {isIncoming
+            {isError
+              ? <div role="alert" className="max-w-sm px-6 text-center"><div className="mx-auto grid h-16 w-16 place-items-center rounded-full bg-rose-950 text-rose-300"><PhoneOff size={26} /></div><p className="mt-4 text-base font-semibold leading-6 text-rose-100">{call.error}</p><p className="mt-2 text-xs text-zinc-400">Menutup panggilan sebentar lagi...</p></div>
+              : isIncoming
               ? <div className="text-center"><div className="mx-auto grid h-20 w-20 place-items-center rounded-full bg-zinc-800 text-rose-300"><Phone size={32} /></div><p className="mt-4 text-lg font-bold">Panggilan video masuk</p><p className="mt-1 text-sm text-zinc-400">dari {partnerDisplayName || 'pasanganmu'}</p></div>
               : call.remoteStream
                 ? <video ref={remoteVideoRef} autoPlay playsInline className="h-full w-full object-contain" />
                 : <div className="text-center text-sm text-zinc-400"><Video size={28} className="mx-auto mb-3 opacity-60" />Menunggu video pasangan...</div>}
-            {!isIncoming && call.localStream && <video ref={localVideoRef} autoPlay playsInline muted className="absolute bottom-4 right-4 aspect-[3/4] w-24 rounded-2xl border border-white/20 bg-zinc-800 object-cover shadow-xl sm:bottom-6 sm:right-6 sm:w-32" />}
+            {!isIncoming && !isError && call.localStream?.getVideoTracks().length > 0 && <video ref={localVideoRef} autoPlay playsInline muted className="absolute bottom-4 right-4 aspect-[3/4] w-24 rounded-2xl border border-white/20 bg-zinc-800 object-cover shadow-xl sm:bottom-6 sm:right-6 sm:w-32" />}
+            {call.notice && call.phase !== 'error' && <p role="status" className="absolute bottom-3 left-3 right-3 rounded-xl bg-black/70 px-3 py-2 text-center text-xs text-zinc-200">{call.notice}</p>}
           </div>
           <footer className="safe-bottom flex items-center justify-center gap-4 px-4 pb-5 pt-4">
-            {isIncoming ? <>
+            {isError ? <p aria-live="polite" className="text-xs text-zinc-400">Panggilan akan ditutup otomatis.</p> : isIncoming ? <>
               <button type="button" onClick={() => endCall('reject')} aria-label="Tolak panggilan" className="grid h-14 w-14 place-items-center rounded-full bg-rose-600 text-white"><PhoneOff size={22} /></button>
               <button type="button" onClick={acceptCall} aria-label="Terima panggilan" className="grid h-14 w-14 place-items-center rounded-full bg-emerald-500 text-white"><Phone size={22} /></button>
             </> : <>
-              <button type="button" onClick={() => toggleTrack('audio')} aria-label={call.muted ? 'Aktifkan mikrofon' : 'Matikan mikrofon'} className="grid h-12 w-12 place-items-center rounded-full bg-zinc-800 text-white">{call.muted ? <MicOff size={20} /> : <Mic size={20} />}</button>
-              <button type="button" onClick={() => toggleTrack('video')} aria-label={call.videoDisabled ? 'Aktifkan kamera' : 'Matikan kamera'} className="grid h-12 w-12 place-items-center rounded-full bg-zinc-800 text-white">{call.videoDisabled ? <VideoOff size={20} /> : <Video size={20} />}</button>
+              <button type="button" onClick={() => toggleTrack('audio')} disabled={!call.localStream?.getAudioTracks().length} aria-label={call.muted ? 'Aktifkan mikrofon' : 'Matikan mikrofon'} className="grid h-12 w-12 place-items-center rounded-full bg-zinc-800 text-white disabled:opacity-40">{call.muted ? <MicOff size={20} /> : <Mic size={20} />}</button>
+              <button type="button" onClick={() => toggleTrack('video')} disabled={!call.localStream?.getVideoTracks().length} aria-label={call.videoDisabled ? 'Aktifkan kamera' : 'Matikan kamera'} className="grid h-12 w-12 place-items-center rounded-full bg-zinc-800 text-white disabled:opacity-40">{call.videoDisabled || !call.localStream?.getVideoTracks().length ? <VideoOff size={20} /> : <Video size={20} />}</button>
               <button type="button" onClick={() => endCall()} aria-label="Akhiri panggilan" className="grid h-14 w-14 place-items-center rounded-full bg-rose-600 text-white"><PhoneOff size={22} /></button>
             </>}
           </footer>
