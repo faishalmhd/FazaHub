@@ -37,6 +37,10 @@ button { -webkit-tap-highlight-color: transparent; }
 ::selection { background: #F43F5E; color: #fff; }
 code, .font-mono { font-family: 'JetBrains Mono', monospace; }
 .chat-scroll-area { background: color-mix(in srgb, var(--app-bg) 58%, var(--app-surface)); }
+.chat-bubble-mine { background-color: #E11D48; color: #FFFFFF; }
+.chat-bubble-partner { background-color: #27272A; color: #F4F4F5; }
+[data-theme='light'] .chat-bubble-mine { background-color: #E11D48; color: #FFFFFF; }
+[data-theme='light'] .chat-bubble-partner { background-color: #EFEFEF; color: #18181B; }
 
 [data-theme='dark'] .bg-cream { background-color: var(--app-bg) !important; }
 [data-theme='dark'] .bg-white { background-color: var(--app-surface) !important; }
