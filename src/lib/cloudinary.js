@@ -34,6 +34,42 @@ export function uploadImage(file, cloudName, uploadPreset, onProgress) {
   })
 }
 
+export async function uploadAudioToCloudinary(audioBlob) {
+  const cloudName = import.meta.env.VITE_CLOUDINARY_CLOUD_NAME
+  const uploadPreset = import.meta.env.VITE_CLOUDINARY_UPLOAD_PRESET
+  if (!cloudName || !uploadPreset) {
+    throw new Error('Cloudinary belum dikonfigurasi untuk mengirim pesan suara.')
+  }
+  if (!(audioBlob instanceof Blob) || audioBlob.size === 0) {
+    throw new Error('Rekaman suara kosong atau tidak valid.')
+  }
+
+  const body = new FormData()
+  const extension = audioBlob.type.includes('mp4') ? 'm4a' : 'webm'
+  body.append('file', audioBlob, `voice-note.${extension}`)
+  body.append('upload_preset', uploadPreset)
+
+  const response = await fetch(`https://api.cloudinary.com/v1_1/${encodeURIComponent(cloudName)}/auto/upload`, {
+    method: 'POST',
+    body
+  })
+
+  let payload
+  try {
+    payload = await response.json()
+  } catch {
+    throw new Error('Respons Cloudinary untuk pesan suara tidak dapat dibaca.')
+  }
+
+  if (!response.ok) {
+    throw new Error(payload.error?.message || 'Pesan suara gagal diunggah ke Cloudinary.')
+  }
+  if (!payload.secure_url) {
+    throw new Error('Cloudinary tidak mengembalikan alamat audio yang aman.')
+  }
+  return payload.secure_url
+}
+
 export function optimizedImage(url, thumbnail = false) {
   if (!url?.includes('/upload/')) return url
   return url.replace('/upload/', thumbnail

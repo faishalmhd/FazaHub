@@ -1,15 +1,17 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
   ArrowRight, Bell, CalendarDays, Camera, Check, ChevronLeft, ChevronRight,
-  Download, Heart, ImagePlus, LogOut, MessageCircle, MessageSquare, Mic, MicOff, Phone, PhoneOff, Plus, Send, Settings, Sparkles, Trash2, Upload, Video, VideoOff, Volume2, X
+  Download, Heart, ImagePlus, LogOut, MessageCircle, MessageSquare, Mic, MicOff, Pause, Phone, PhoneOff, Plus, Send, Settings, Sparkles, Trash2, Upload, Video, VideoOff, Volume2, X
 } from 'lucide-react'
 import { isSupabaseConfigured, supabase } from './lib/supabase'
-import { uploadImage, optimizedImage } from './lib/cloudinary'
+import { uploadAudioToCloudinary, uploadImage, optimizedImage } from './lib/cloudinary'
 import { exportJournal } from './lib/exportJournal'
 import { compressImage } from './utils/compressImage'
 import { checkLocalReminder, downloadCalendarAlarm, readReminderSettings, saveReminderSettings, showTestReminder } from './utils/reminder'
 import { readMessageNotificationSettings, requestMessageNotificationPermission, saveMessageNotificationSettings, showIncomingMessageNotification } from './utils/messageNotifications'
 import { playIphoneMessageTone, playIphoneTestSounds, startIphoneRingback, startIphoneRingtone, stopIphoneRingback, stopIphoneRingtone } from './utils/iphoneSounds'
+import VoiceRecorderBar from './components/VoiceRecorderBar'
+import VoiceMessageBubble, { pauseActiveVoiceMessage } from './components/VoiceMessageBubble'
 
 const moods = [
   { label: 'Happy', emoji: '☀️' },
@@ -706,6 +708,7 @@ function ChatView({
   const displayName = partnerDisplayName || 'Pasangan'
   const initial = displayName.slice(0, 1).toUpperCase()
   const canSend = Boolean((draft.trim() || selectedImage) && !busy)
+  const canSendTextOrPhoto = Boolean(draft.trim() || selectedImage)
 
   useEffect(() => {
     if (!selectedImage) { setPreviewUrl(''); return undefined }
@@ -760,6 +763,17 @@ function ChatView({
     }
   }
 
+  async function submitVoiceNote(blob, duration) {
+    setBusy(true)
+    setError('')
+    try {
+      const audioUrl = await uploadAudioToCloudinary(blob)
+      await onSend('', null, audioUrl, duration)
+    } finally {
+      setBusy(false)
+    }
+  }
+
   function chooseImage(event) {
     const file = event.currentTarget.files?.[0]
     event.currentTarget.value = ''
@@ -775,7 +789,7 @@ function ChatView({
 
   return (
     <section className={`flex flex-col overflow-hidden bg-cream ${keyboardOpen ? 'h-[100dvh]' : 'h-[calc(100dvh-5rem)]'} sm:h-full`}>
-      <header className="sticky top-0 z-20 flex h-[calc(4rem+env(safe-area-inset-top))] shrink-0 items-center justify-between gap-2 border-b border-line bg-white/95 px-4 pt-[env(safe-area-inset-top)] backdrop-blur-xl">
+      <header className="chat-header sticky top-0 z-20 flex h-[calc(4rem+env(safe-area-inset-top))] shrink-0 items-center justify-between gap-2 border-b px-4 pt-[env(safe-area-inset-top)] backdrop-blur-xl">
         <div className="flex min-w-0 items-center gap-2.5">
           <button
             type="button"
@@ -785,15 +799,15 @@ function ChatView({
           >
             <ChevronLeft size={22} />
           </button>
-          <div className="relative grid h-10 w-10 shrink-0 place-items-center rounded-full bg-[#FFF0EC] text-sm font-extrabold text-terracotta">
+          <div className="chat-avatar relative grid h-10 w-10 shrink-0 place-items-center rounded-full border text-sm font-extrabold">
             {initial}
             <span
               aria-hidden="true"
-              className={`absolute bottom-0 right-0 h-2.5 w-2.5 rounded-full ring-2 ring-white ${partnerId ? (realtimeReady ? 'bg-emerald-500' : 'bg-amber-400') : 'bg-zinc-500'}`}
+              className={`chat-avatar-status absolute bottom-0 right-0 h-2.5 w-2.5 rounded-full ring-2 ${partnerId ? (realtimeReady ? 'bg-emerald-500' : 'bg-amber-400') : 'bg-zinc-500'}`}
             />
           </div>
           <div className="min-w-0">
-            <h1 className="truncate text-sm font-extrabold leading-tight text-charcoal">{displayName}</h1>
+            <h1 className="chat-partner-name truncate text-sm font-semibold leading-tight">{displayName}</h1>
             <p className="mt-0.5 truncate text-[11px] leading-tight text-taupe">
               {partnerId ? (realtimeReady ? 'Terhubung · Ruang berdua' : 'Menghubungkan...') : 'Menunggu pasangan'}
             </p>
@@ -806,7 +820,7 @@ function ChatView({
             disabled={callDisabled}
             aria-label="Panggilan suara"
             title={partnerId ? (realtimeReady ? 'Panggilan suara' : 'Menghubungkan...') : 'Pasangan belum bergabung'}
-            className="grid h-10 w-10 place-items-center rounded-full border border-line bg-cream text-charcoal transition hover:text-terracotta active:scale-95 disabled:opacity-40"
+            className="chat-call-button grid h-10 w-10 place-items-center rounded-full border transition active:scale-95 disabled:opacity-40"
           >
             <Phone size={18} />
           </button>
@@ -816,7 +830,7 @@ function ChatView({
             disabled={callDisabled}
             aria-label="Panggilan video"
             title={partnerId ? (realtimeReady ? 'Panggilan video' : 'Menghubungkan...') : 'Pasangan belum bergabung'}
-            className="grid h-10 w-10 place-items-center rounded-full border border-line bg-cream text-terracotta transition hover:bg-[#FFF0EC] active:scale-95 disabled:opacity-40"
+            className="chat-call-button grid h-10 w-10 place-items-center rounded-full border transition active:scale-95 disabled:opacity-40"
           >
             <Video size={18} />
           </button>
@@ -858,6 +872,7 @@ function ChatView({
                         <img src={optimizedImage(message.image_url, true)} alt="Foto dalam pesan" loading="lazy" className="max-h-64 w-full min-w-36 object-cover" />
                       </button>
                     )}
+                    {message.audio_url && <VoiceMessageBubble audioUrl={message.audio_url} audioDuration={message.audio_duration} />}
                     {message.body && <p className="whitespace-pre-wrap break-words text-sm leading-5">{message.body}</p>}
                     <time className={`mt-1 block text-right font-mono text-[9px] ${mine ? 'text-white/75' : 'text-taupe'}`}>
                       {new Intl.DateTimeFormat('id-ID', { hour: '2-digit', minute: '2-digit' }).format(new Date(message.created_at))}
@@ -879,45 +894,101 @@ function ChatView({
             <button type="button" onClick={() => setSelectedImage(null)} aria-label="Hapus foto pilihan" className="grid h-8 w-8 place-items-center rounded-full text-taupe hover:bg-white"><X size={16} /></button>
           </div>
         )}
-        <div className="flex items-end gap-2 rounded-[26px] border border-line bg-cream px-2 py-1.5 focus-within:border-rose-500/50">
-          <button
-            type="button"
-            onClick={() => imageInputRef.current?.click()}
-            disabled={busy}
-            aria-label="Lampirkan foto"
-            title="Lampirkan foto"
-            className="grid h-9 w-9 shrink-0 place-items-center rounded-full bg-white text-charcoal transition hover:text-terracotta active:scale-95 disabled:opacity-40"
-          >
-            <Plus size={19} />
-          </button>
-          <label htmlFor="couple-chat-message" className="sr-only">Tulis pesan</label>
-          <textarea
-            ref={textareaRef}
-            id="couple-chat-message"
-            value={draft}
-            onChange={event => setDraft(event.target.value)}
-            onKeyDown={event => {
-              if (event.key === 'Enter' && !event.shiftKey && !event.nativeEvent.isComposing) {
-                event.preventDefault()
-                event.currentTarget.form?.requestSubmit()
-              }
-            }}
-            maxLength={2000}
-            rows={1}
-            placeholder="Tulis pesan..."
-            className="max-h-24 min-h-9 flex-1 resize-none bg-transparent px-1.5 py-2 text-sm leading-5 outline-none placeholder:text-taupe"
-          />
-          <button
-            type="submit"
-            disabled={!canSend}
-            aria-label={busy ? 'Mengirim pesan' : 'Kirim pesan'}
-            className={`grid h-9 w-9 shrink-0 place-items-center rounded-full transition active:scale-95 ${canSend ? 'bg-rose-500 text-white shadow-sm' : 'bg-white/60 text-taupe opacity-40'}`}
-          >
-            {busy ? <span className="h-4 w-4 animate-spin rounded-full border-2 border-white/40 border-t-white" /> : <Send size={16} />}
-          </button>
-        </div>
-        {busy && selectedImage && <p aria-live="polite" className="mt-1.5 text-center text-[11px] text-taupe">{uploadProgress ? `Mengirim foto · ${uploadProgress}%` : 'Mengoptimalkan foto...'}</p>}
-        {error && <p role="alert" className="mt-1.5 text-xs text-rose-400">{error}</p>}
+        <VoiceRecorderBar disabled={busy} onSendAudio={submitVoiceNote}>
+          {recorder => {
+            const showRecorderControls = recorder.recording || recorder.pendingAudio || recorder.sending
+            return (
+              <>
+                {showRecorderControls ? (
+                  <div className="flex min-h-12 items-center gap-3 rounded-[26px] border border-line bg-cream px-3 py-1.5">
+                    <button
+                      type="button"
+                      onClick={recorder.cancelRecording}
+                      disabled={recorder.sending}
+                      aria-label="Hapus pesan suara"
+                      className="grid h-9 w-9 shrink-0 place-items-center rounded-full text-rose-500 transition hover:bg-rose-500/10 disabled:opacity-40"
+                    >
+                      <Trash2 size={18} />
+                    </button>
+                    <div className="flex min-w-0 flex-1 items-center gap-2 text-sm text-charcoal">
+                      {recorder.recording && <span className="h-2.5 w-2.5 shrink-0 animate-pulse rounded-full bg-rose-500" />}
+                      <span className="font-mono tabular-nums">
+                        {recorder.formatDuration(recorder.elapsedSeconds || recorder.pendingAudio?.duration || 0)}
+                      </span>
+                      <span className="truncate text-xs text-taupe">
+                        {recorder.recording ? 'Merekam pesan suara...' : recorder.sending ? 'Mengirim pesan suara...' : 'Siap dikirim'}
+                      </span>
+                      {recorder.recording && <Pause size={15} className="ml-auto shrink-0 text-rose-500" />}
+                    </div>
+                    <button
+                      type="button"
+                      onClick={recorder.sendRecording}
+                      disabled={recorder.sending || busy}
+                      aria-label="Kirim pesan suara"
+                      className="grid h-10 w-10 shrink-0 place-items-center rounded-full bg-rose-500 text-white shadow-sm transition active:scale-95 disabled:opacity-50"
+                    >
+                      {recorder.sending ? <span className="h-4 w-4 animate-spin rounded-full border-2 border-white/40 border-t-white" /> : <Send size={17} />}
+                    </button>
+                  </div>
+                ) : (
+                  <div className="flex items-end gap-2 rounded-[26px] border border-line bg-cream px-2 py-1.5 focus-within:border-rose-500/50">
+                    <button
+                      type="button"
+                      onClick={() => imageInputRef.current?.click()}
+                      disabled={busy}
+                      aria-label="Lampirkan foto"
+                      title="Lampirkan foto"
+                      className="grid h-9 w-9 shrink-0 place-items-center rounded-full bg-white text-charcoal transition hover:text-terracotta active:scale-95 disabled:opacity-40"
+                    >
+                      <Plus size={19} />
+                    </button>
+                    <label htmlFor="couple-chat-message" className="sr-only">Tulis pesan</label>
+                    <textarea
+                      ref={textareaRef}
+                      id="couple-chat-message"
+                      value={draft}
+                      onChange={event => setDraft(event.target.value)}
+                      onKeyDown={event => {
+                        if (event.key === 'Enter' && !event.shiftKey && !event.nativeEvent.isComposing) {
+                          event.preventDefault()
+                          event.currentTarget.form?.requestSubmit()
+                        }
+                      }}
+                      maxLength={2000}
+                      rows={1}
+                      placeholder="Tulis pesan..."
+                      className="max-h-24 min-h-9 flex-1 resize-none bg-transparent px-1.5 py-2 text-sm leading-5 outline-none placeholder:text-taupe"
+                    />
+                    {canSendTextOrPhoto ? (
+                      <button
+                        type="submit"
+                        disabled={!canSend}
+                        aria-label={busy ? 'Mengirim pesan' : 'Kirim pesan'}
+                        className={`grid h-9 w-9 shrink-0 place-items-center rounded-full transition active:scale-95 ${canSend ? 'bg-rose-500 text-white shadow-sm' : 'bg-white/60 text-taupe opacity-40'}`}
+                      >
+                        {busy ? <span className="h-4 w-4 animate-spin rounded-full border-2 border-white/40 border-t-white" /> : <Send size={16} />}
+                      </button>
+                    ) : (
+                      <button
+                        type="button"
+                        onClick={recorder.startRecording}
+                        disabled={busy}
+                        aria-label="Rekam pesan suara"
+                        title="Rekam pesan suara"
+                        className="grid h-9 w-9 shrink-0 place-items-center rounded-full bg-rose-500 text-white shadow-sm transition active:scale-95 disabled:opacity-40"
+                      >
+                        <Mic size={17} />
+                      </button>
+                    )}
+                  </div>
+                )}
+                {busy && selectedImage && <p aria-live="polite" className="mt-1.5 text-center text-[11px] text-taupe">{uploadProgress ? `Mengirim foto · ${uploadProgress}%` : 'Mengoptimalkan foto...'}</p>}
+                {error && <p role="alert" className="mt-1.5 text-xs text-rose-400">{error}</p>}
+                {recorder.error && <p role="alert" className="mt-1.5 text-xs text-rose-400">{recorder.error}</p>}
+              </>
+            )
+          }}
+        </VoiceRecorderBar>
       </form>
 
       {imageToView && (
@@ -1911,7 +1982,7 @@ function AppShell({ user, couple, theme, onThemeChange, onSignOut, onLeaveRoom }
     let offset = 0
     while (true) {
       const { data, error: loadError } = await supabase.from('couple_messages')
-        .select('id,couple_id,user_id,body,image_url,created_at')
+        .select('id,couple_id,user_id,body,image_url,audio_url,audio_duration,created_at')
         .eq('couple_id', couple.id)
         .order('created_at', { ascending: true })
         .range(offset, offset + pageSize - 1)
@@ -1954,10 +2025,17 @@ function AppShell({ user, couple, theme, onThemeChange, onSignOut, onLeaveRoom }
       : [...current, data].sort((a, b) => new Date(a.created_at) - new Date(b.created_at)))
   }
 
-  async function sendMessage(body, imageUrl = null) {
+  async function sendMessage(body, imageUrl = null, audioUrl = null, audioDuration = null) {
     const { data, error: insertError } = await supabase.from('couple_messages')
-      .insert({ couple_id: couple.id, user_id: user.id, body, image_url: imageUrl })
-      .select('id,couple_id,user_id,body,image_url,created_at')
+      .insert({
+        couple_id: couple.id,
+        user_id: user.id,
+        body,
+        image_url: imageUrl,
+        audio_url: audioUrl,
+        audio_duration: audioDuration
+      })
+      .select('id,couple_id,user_id,body,image_url,audio_url,audio_duration,created_at')
       .single()
     if (insertError) throw insertError
     setMessages(current => current.some(message => message.id === data.id)
@@ -2087,6 +2165,9 @@ function AppShell({ user, couple, theme, onThemeChange, onSignOut, onLeaveRoom }
     { id: 'space', label: 'Ruang kita', icon: Settings }
   ]
   const callCtrl = useVideoCall({ user, couple })
+  useEffect(() => {
+    if (callCtrl.call.phase === 'incoming') pauseActiveVoiceMessage()
+  }, [callCtrl.call.phase])
   const [keyboardOpen, setKeyboardOpen] = useState(false)
   const baselineHeightRef = useRef(typeof window !== 'undefined' ? (window.visualViewport?.height || window.innerHeight) : 0)
 

@@ -43,16 +43,26 @@ create table if not exists public.couple_messages (
   user_id uuid references auth.users(id) on delete cascade not null,
   body varchar(2000) not null check (length(trim(body)) between 0 and 2000),
   image_url text,
+  audio_url text,
+  audio_duration integer,
   created_at timestamptz not null default now()
 );
 
 alter table public.couple_messages add column if not exists image_url text;
+alter table public.couple_messages add column if not exists audio_url text;
+alter table public.couple_messages add column if not exists audio_duration integer;
 alter table public.couple_messages drop constraint if exists couple_messages_body_check;
 alter table public.couple_messages add constraint couple_messages_body_check
   check (length(trim(body)) between 0 and 2000);
 alter table public.couple_messages drop constraint if exists couple_messages_content_present;
 alter table public.couple_messages add constraint couple_messages_content_present
-  check (length(trim(body)) > 0 or image_url is not null);
+  check (length(trim(body)) > 0 or image_url is not null or audio_url is not null);
+alter table public.couple_messages drop constraint if exists couple_messages_audio_duration_check;
+alter table public.couple_messages add constraint couple_messages_audio_duration_check
+  check (
+    (audio_url is null and audio_duration is null)
+    or (audio_url is not null and audio_duration between 1 and 120)
+  );
 
 create index if not exists idx_daily_snaps_couple_date
   on public.daily_snaps (couple_id, snap_date, created_at desc);
