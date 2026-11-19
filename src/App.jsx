@@ -1072,27 +1072,39 @@ function useVideoCall({ user, couple }) {
     }
   }, [call.callId, call.phase])
 
-  function showCallError(error, callId = callRef.current.callId) {
+  function showCallError(error, callId = callRef.current.callId, reason = '') {
     if (!callId || callRef.current.callId !== callId) return
     const name = error?.name || 'Error'
     const message = error?.message || ''
-    let displayMessage
-    if (name === 'NotAllowedError' || name === 'PermissionDeniedError' || name === 'SecurityError') {
-      displayMessage = 'Izin kamera/mikrofon ditolak. Izinkan akses di pengaturan browser, lalu coba lagi.'
+    let title
+    let detail
+    if (reason === 'busy') {
+      title = `${partnerDisplayName || 'Pasangan'} sedang sibuk`
+      detail = 'Coba hubungi lagi beberapa saat'
+    } else if (reason === 'rejected') {
+      title = 'Panggilan ditolak'
+      detail = 'Mengakhiri panggilan...'
+    } else if (reason === 'ended') {
+      title = 'Panggilan berakhir'
+      detail = 'Pasangan mengakhiri panggilan'
+    } else if (reason === 'timeout' || name === 'TimeoutError' || /timeout|timed out|tidak dijawab/i.test(message)) {
+      title = 'Tidak dijawab'
+      detail = `${partnerDisplayName || 'Pasangan'} belum mengangkat panggilanmu`
+    } else if (name === 'NotAllowedError' || name === 'PermissionDeniedError' || name === 'SecurityError') {
+      title = 'Akses kamera/mikrofon diperlukan'
+      detail = 'Izinkan akses di pengaturan browser untuk menelepon'
     } else if (name === 'NotReadableError') {
-      displayMessage = 'Kamera atau mikrofon sedang dipakai aplikasi/tab lain. Tutup aplikasi tersebut, lalu coba lagi.'
+      title = 'Kamera atau mikrofon sedang digunakan'
+      detail = 'Tutup aplikasi lain yang sedang memakainya lalu coba lagi'
     } else if (name === 'NotFoundError') {
-      displayMessage = 'Kamera atau mikrofon tidak ditemukan. Periksa perangkat, lalu coba lagi.'
-    } else if (name === 'AbortError') {
-      displayMessage = 'Akses kamera/mikrofon terhenti. Periksa perangkat lalu coba lagi.'
-    } else if (name === 'OverconstrainedError') {
-      displayMessage = 'Kamera tidak mendukung pengaturan yang diminta. Periksa perangkat lalu coba lagi.'
-    } else if (name === 'OperationError' || /channel|realtime|sinyal/i.test(message)) {
-      displayMessage = 'Gagal terhubung ke server sinyal. Periksa koneksi internet dan Realtime Supabase.'
-    } else if (name === 'NetworkError') {
-      displayMessage = 'Koneksi jaringan WebRTC gagal setelah mencoba menyambungkan ulang. Periksa jaringan atau server relay.'
+      title = 'Kamera atau mikrofon tidak tersedia'
+      detail = 'Periksa perangkatmu lalu coba lagi'
+    } else if (name === 'OperationError' || name === 'NetworkError' || /channel|realtime|sinyal|koneksi/i.test(message)) {
+      title = 'Koneksi terputus'
+      detail = 'Periksa jaringan internetmu lalu coba lagi'
     } else {
-      displayMessage = message ? `Panggilan gagal (${name}): ${message}` : `Panggilan gagal (${name}). Coba lagi.`
+      title = 'Panggilan tidak tersambung'
+      detail = 'Coba hubungi lagi beberapa saat'
     }
 
     peerConnectionRef.current?.close()
@@ -1101,7 +1113,7 @@ function useVideoCall({ user, couple }) {
     localStreamRef.current?.getTracks().forEach(track => track.stop())
     localStreamRef.current = null
     updateCall(state => state.callId === callId
-      ? { ...state, phase: 'error', error: displayMessage, localStream: null, remoteStream: null }
+      ? { ...state, phase: 'error', error: title, errorDetail: detail, localStream: null, remoteStream: null }
       : state)
     window.clearTimeout(callErrorTimerRef.current)
     callErrorTimerRef.current = window.setTimeout(() => {
@@ -1448,11 +1460,13 @@ function useVideoCall({ user, couple }) {
         pendingCandidatesRef.current.push(signal.data)
       }
     } else if (signal.kind === 'busy') {
-      showCallError(new Error(`${partnerDisplayName || 'Pasangan'} sedang menerima panggilan lain.`), signal.callId)
+      showCallError(new Error('Partner is busy.'), signal.callId, 'busy')
+    } else if (signal.kind === 'timeout') {
+      showCallError(new Error('Call was not answered.'), signal.callId, 'timeout')
     } else if (signal.kind === 'reject') {
-      showCallError(new Error(`${partnerDisplayName || 'Pasangan'} belum bisa menerima panggilan.`), signal.callId)
+      showCallError(new Error('Call was declined.'), signal.callId, 'rejected')
     } else if (signal.kind === 'hangup') {
-      showCallError(new Error('Pasangan mengakhiri panggilan.'), signal.callId)
+      showCallError(new Error('Call ended.'), signal.callId, 'ended')
     }
   }, [partnerDisplayName, partnerId, sendSignal, user.id])
 
@@ -1666,14 +1680,13 @@ function useVideoCall({ user, couple }) {
       updateCall(state => ({ ...state, localStream: refreshedLocalStream, callType: 'video', videoDisabled: false, error: '', notice: '' }))
     } catch (error) {
       cameraTrack?.stop()
-      const name = error?.name || 'Error'
       const message = error?.name === 'NotAllowedError' || error?.name === 'PermissionDeniedError'
-        ? 'Izin kamera ditolak. Izinkan kamera di pengaturan browser, lalu coba lagi.'
+        ? 'Akses kamera/mikrofon diperlukan. Izinkan akses di pengaturan browser untuk menelepon.'
         : error?.name === 'NotReadableError'
-          ? 'Kamera sedang dipakai aplikasi/tab lain. Tutup aplikasi tersebut, lalu coba lagi.'
+          ? 'Kamera sedang digunakan aplikasi lain. Tutup aplikasi tersebut lalu coba lagi.'
           : error?.name === 'NotFoundError'
-            ? 'Kamera tidak ditemukan. Periksa perangkat, lalu coba lagi.'
-            : error?.message || `Kamera gagal diaktifkan (${name}).`
+            ? 'Kamera tidak tersedia. Periksa perangkatmu lalu coba lagi.'
+            : 'Kamera tidak dapat diaktifkan. Periksa izin dan coba lagi.'
       updateCall(state => ({ ...state, error: message }))
     }
   }
@@ -1749,7 +1762,7 @@ function VideoCallOverlay({ callCtrl }) {
           <div role="alert" className="max-w-sm">
             <div className="mx-auto grid h-16 w-16 place-items-center rounded-full bg-rose-950 text-rose-300"><PhoneOff size={26} /></div>
             <p className="mt-4 text-base font-semibold leading-6 text-rose-100">{call.error}</p>
-            <p className="mt-2 text-xs text-zinc-400">Menutup panggilan sebentar lagi...</p>
+            <p className="mt-2 text-xs text-zinc-400">{call.errorDetail || 'Menutup panggilan sebentar lagi...'}</p>
           </div>
         </div>
       ) : isIncoming ? (
