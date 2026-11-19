@@ -9,6 +9,11 @@ create table if not exists public.couples (
   partner_2_id uuid references auth.users(id),
   partner_2_name varchar(50),
   created_at timestamptz default now(),
+  streak_count integer not null default 0,
+  last_streak_date date,
+  streak_freeze_count integer not null default 2,
+  user1_active_date date,
+  user2_active_date date,
   constraint couples_partner_2_pair check ((partner_2_id is null) = (partner_2_name is null)),
   constraint couples_distinct_partners check (partner_2_id is null or partner_1_id <> partner_2_id)
 );
@@ -64,6 +69,23 @@ alter table public.couple_messages add constraint couple_messages_audio_duration
     or (audio_url is not null and audio_duration between 1 and 120)
   );
 
+create table if not exists public.couple_games (
+  id uuid primary key default gen_random_uuid(),
+  couple_id uuid references public.couples(id) on delete cascade not null unique,
+  game_type text not null default 'tic_tac_toe'
+    check (game_type in ('tic_tac_toe', 'rock_paper_scissors', 'couple_quiz')),
+  status text not null default 'active',
+  game_state jsonb not null default '{}'::jsonb,
+  updated_by uuid references auth.users(id) on delete set null,
+  updated_at timestamptz not null default now()
+);
+
+alter table public.couples add column if not exists streak_count integer not null default 0;
+alter table public.couples add column if not exists last_streak_date date;
+alter table public.couples add column if not exists streak_freeze_count integer not null default 2;
+alter table public.couples add column if not exists user1_active_date date;
+alter table public.couples add column if not exists user2_active_date date;
+
 create index if not exists idx_daily_snaps_couple_date
   on public.daily_snaps (couple_id, snap_date, created_at desc);
 create index if not exists idx_snap_comments_snap_created
@@ -99,6 +121,7 @@ alter table public.couples enable row level security;
 alter table public.daily_snaps enable row level security;
 alter table public.snap_comments enable row level security;
 alter table public.couple_messages enable row level security;
+alter table public.couple_games enable row level security;
 
 drop policy if exists "Users can view their own couple" on public.couples;
 create policy "Users can view their own couple" on public.couples
@@ -109,6 +132,18 @@ create policy "Authenticated users can create a couple" on public.couples
   for insert with check (
     auth.uid() = partner_1_id and partner_2_id is null and partner_2_name is null
   );
+
+drop policy if exists "Authenticated access couple_games" on public.couple_games;
+drop policy if exists "Couple members can view games" on public.couple_games;
+create policy "Couple members can view games" on public.couple_games
+  for select to authenticated using (
+    exists (
+      select 1 from public.couples
+      where couples.id = couple_games.couple_id
+        and (couples.partner_1_id = auth.uid() or couples.partner_2_id = auth.uid())
+    )
+  );
+grant select on public.couple_games to authenticated;
 
 -- Invitation codes are not exposed through a policy that lists all open rooms.
 -- Joining and leaving are handled by narrowly scoped RPCs instead of broad UPDATE policies.
@@ -290,5 +325,11 @@ begin
     where pubname = 'supabase_realtime' and schemaname = 'public' and tablename = 'couple_messages'
   ) then
     alter publication supabase_realtime add table public.couple_messages;
+  end if;
+  if not exists (
+    select 1 from pg_publication_tables
+    where pubname = 'supabase_realtime' and schemaname = 'public' and tablename = 'couple_games'
+  ) then
+    alter publication supabase_realtime add table public.couple_games;
   end if;
 end $$;

@@ -37,6 +37,9 @@ button { -webkit-tap-highlight-color: transparent; }
 ::selection { background: #F43F5E; color: #fff; }
 code, .font-mono { font-family: 'JetBrains Mono', monospace; }
 .chat-scroll-area { background: color-mix(in srgb, var(--app-bg) 58%, var(--app-surface)); }
+.streak-fire-card {
+  background: linear-gradient(120deg, rgba(244, 63, 94, .12), var(--app-surface) 52%, rgba(251, 146, 60, .08));
+}
 .chat-header {
   background-color: rgba(9, 9, 11, .85);
   border-color: rgba(255, 255, 255, .08);

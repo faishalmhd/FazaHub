@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
   ArrowRight, Bell, CalendarDays, Camera, Check, ChevronLeft, ChevronRight,
-  Download, Heart, ImagePlus, LogOut, MessageCircle, MessageSquare, Mic, MicOff, Pause, Phone, PhoneOff, Plus, Send, Settings, Sparkles, Trash2, Upload, Video, VideoOff, Volume2, X
+  Download, Gamepad2, Heart, ImagePlus, LogOut, MessageCircle, MessageSquare, Mic, MicOff, Pause, Phone, PhoneOff, Plus, Send, Settings, Sparkles, Trash2, Upload, Video, VideoOff, Volume2, X
 } from 'lucide-react'
 import { isSupabaseConfigured, supabase } from './lib/supabase'
 import { uploadAudioToCloudinary, uploadImage, optimizedImage } from './lib/cloudinary'
@@ -12,6 +12,8 @@ import { readMessageNotificationSettings, requestMessageNotificationPermission, 
 import { playIphoneMessageTone, playIphoneTestSounds, startIphoneRingback, startIphoneRingtone, stopIphoneRingback, stopIphoneRingtone } from './utils/iphoneSounds'
 import VoiceRecorderBar from './components/VoiceRecorderBar'
 import VoiceMessageBubble, { pauseActiveVoiceMessage } from './components/VoiceMessageBubble'
+import CoupleGames from './components/CoupleGames'
+import StreakFireCard from './components/StreakFireCard'
 
 const moods = [
   { label: 'Happy', emoji: '☀️' },
@@ -270,15 +272,15 @@ function CommentThread({ snapId, comments, loading, userId, partnerName, onAddCo
   )
 }
 
-function FeedView({ snaps, partnerName, userId, commentsBySnap, commentsLoading, onAddComment, onAdd, loading, streak, todayUserCount, reminderDue, onDelete }) {
+function FeedView({ snaps, partnerName, userId, user, couple, today, commentsBySnap, commentsLoading, onAddComment, onAdd, loading, streak, todayUserCount, reminderDue, onDelete }) {
   return (
     <div className="pb-6">
       <div className="mb-6">
         <p className="font-mono text-xs uppercase tracking-[.16em] text-taupe">{dateLabel(localDate())}</p>
         <div className="mt-2 flex items-end justify-between gap-3">
           <div><p className="text-xs font-semibold text-taupe">Cerita hari ini</p><h1 className="mt-1 text-3xl font-extrabold tracking-tight">Hari ini</h1></div>
-          <span className="rounded-full border border-line bg-white px-3 py-1.5 font-mono text-xs font-bold text-charcoal">{streak}D <span aria-hidden="true">🔥</span></span>
         </div>
+        <StreakFireCard couple={couple} user={user} today={today} fallbackStreak={streak} />
         <p className="mt-3 text-xs text-taupe">{todayUserCount > 0 ? `Kamu sudah menyimpan ${todayUserCount} momen hari ini.` : 'Simpan momen pertamamu hari ini.'}</p>
       </div>
       {reminderDue && <div className="mb-4 rounded-2xl border border-white/10 bg-white/5 px-4 py-3 text-sm text-white/80">Hari ini masih punya satu ruang untuk disimpan.</div>}
@@ -622,7 +624,7 @@ function AddSnapModal({ userId, coupleId, onClose, onSaved }) {
       if (saveError) {
         throw new Error(`Foto sudah terunggah, tetapi catatannya gagal disimpan: ${saveError.message}. Periksa feed sebelum mencoba unggah ulang.`)
       }
-      onSaved()
+      await onSaved(date)
     } catch (uploadError) {
       setError(uploadError.message || 'Momen belum berhasil disimpan. Coba lagi ya.')
     } finally {
@@ -1909,7 +1911,7 @@ function VideoCallOverlay({ callCtrl }) {
   )
 }
 
-const tabFromHash = hash => hash === '#calendar' ? 'calendar' : hash === '#space' ? 'space' : hash === '#chat' ? 'chat' : 'feed'
+const tabFromHash = hash => hash === '#calendar' ? 'calendar' : hash === '#games' ? 'games' : hash === '#space' ? 'space' : hash === '#chat' ? 'chat' : 'feed'
 
 function AppShell({ user, couple, theme, onThemeChange, onSignOut, onLeaveRoom }) {
   const [snaps, setSnaps] = useState([])
@@ -2175,6 +2177,7 @@ function AppShell({ user, couple, theme, onThemeChange, onSignOut, onLeaveRoom }
     { id: 'feed', label: 'Beranda', icon: Heart },
     { id: 'calendar', label: 'Kalender', icon: CalendarDays },
     { id: 'chat', label: 'Pesan', icon: MessageCircle },
+    { id: 'games', label: 'Main', icon: Gamepad2 },
     { id: 'space', label: 'Ruang kita', icon: Settings }
   ]
   const callCtrl = useVideoCall({ user, couple })
@@ -2242,6 +2245,9 @@ function AppShell({ user, couple, theme, onThemeChange, onSignOut, onLeaveRoom }
             snaps={todaySnaps}
             partnerName={partnerName}
             userId={user.id}
+            user={user}
+            couple={couple}
+            today={today}
             commentsBySnap={commentsBySnap}
             commentsLoading={commentsLoading}
             onAddComment={addComment}
@@ -2253,6 +2259,7 @@ function AppShell({ user, couple, theme, onThemeChange, onSignOut, onLeaveRoom }
             reminderDue={reminderDue}
           />}
           {route.tab === 'calendar' && <CalendarView snaps={snaps} onSelectDate={date => pushRoute({ tab: 'calendar', overlay: 'day', date })} />}
+          {route.tab === 'games' && <CoupleGames couple={couple} user={user} />}
           {isChatTab && <ChatView
             messages={messages}
             user={user}
@@ -2285,7 +2292,7 @@ function AppShell({ user, couple, theme, onThemeChange, onSignOut, onLeaveRoom }
               {tabs.map(item => {
                 const Icon = item.icon
                 const active = route.tab === item.id
-                return <button key={item.id} onClick={() => pushRoute({ tab: item.id })} aria-current={active ? 'page' : undefined} className={`flex min-w-[72px] flex-col items-center gap-1 rounded-xl px-3 py-2 transition ${active ? 'text-terracotta' : 'text-[#A1A1AA]'}`}><Icon size={20} strokeWidth={active ? 2.4 : 1.8} fill={active && item.id === 'feed' ? 'currentColor' : 'none'} /><span className={`text-[10px] ${active ? 'font-extrabold' : 'font-semibold'}`}>{item.label}</span></button>
+                return <button key={item.id} onClick={() => pushRoute({ tab: item.id })} aria-current={active ? 'page' : undefined} className={`flex min-w-0 flex-1 flex-col items-center gap-1 rounded-xl px-1 py-2 transition ${active ? 'text-terracotta' : 'text-[#A1A1AA]'}`}><Icon size={20} strokeWidth={active ? 2.4 : 1.8} fill={active && item.id === 'feed' ? 'currentColor' : 'none'} /><span className={`text-[9px] sm:text-[10px] ${active ? 'font-extrabold' : 'font-semibold'}`}>{item.label}</span></button>
               })}
             </div>
           </nav>
@@ -2296,8 +2303,19 @@ function AppShell({ user, couple, theme, onThemeChange, onSignOut, onLeaveRoom }
         userId={user.id}
         coupleId={couple.id}
         onClose={closeOverlay}
-        onSaved={async () => {
+        onSaved={async snapDate => {
+          let streakError
+          if (snapDate === today) {
+            try {
+              ({ error: streakError } = await supabase.rpc('record_couple_activity', { p_couple_id: couple.id }))
+            } catch (activityError) {
+              streakError = activityError
+            }
+          }
           await loadSnaps()
+          if (streakError) {
+            setError(`Momen tersimpan, tetapi streak belum diperbarui. Jalankan SQL setup Main Berdua di Supabase.`)
+          }
           pushRoute({ tab: 'feed' })
         }}
       />}
