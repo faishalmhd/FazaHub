@@ -22,14 +22,135 @@ const initialState = {
   couple_quiz: { questionIndex: 0, answers: {}, scores: {}, revealed: false }
 }
 
-function messageForSupabaseError(error) {
-  if (error?.code === 'PGRST202' || /function .*not found|could not find function/i.test(error?.message || '')) {
-    return 'Aktifkan skema Main Berdua di Supabase sebelum bermain.'
-  }
-  if (error?.code === '42P01' || /couple_games/i.test(error?.message || '')) {
-    return 'Tabel Main Berdua belum tersedia. Jalankan SQL setup di Supabase.'
+const gameColumns = 'couple_id,game_type,status,game_state,updated_by,updated_at'
+const winningLines = [[0, 1, 2], [3, 4, 5], [6, 7, 8], [0, 3, 6], [1, 4, 7], [2, 5, 8], [0, 4, 8], [2, 4, 6]]
+
+function logDatabaseError(context, error) {
+  console.error(`[Main Berdua] ${context}: ${error?.message || 'Unknown Supabase error'}`, error)
+  if (error?.code === '42P01' || error?.code === '42703' || error?.code === 'PGRST204' || error?.code === 'PGRST205') {
+    return 'Skema Main Berdua belum lengkap. Periksa tabel dan kolom couple_games di Supabase.'
   }
   return error?.message || 'Permainan belum dapat disinkronkan. Coba lagi.'
+}
+
+function makeGameState(type) {
+  return JSON.parse(JSON.stringify(initialState[type]))
+}
+
+function normalizeGameState(type, state) {
+  const defaults = makeGameState(type)
+  if (!state || typeof state !== 'object') return defaults
+  return {
+    ...defaults,
+    ...state,
+    ...(defaults.board ? { board: Array.isArray(state.board) ? state.board : defaults.board } : {}),
+    ...(defaults.choices ? { choices: { ...defaults.choices, ...state.choices } } : {}),
+    ...(defaults.answers ? { answers: { ...defaults.answers, ...state.answers } } : {}),
+    ...(defaults.scores ? { scores: { ...defaults.scores, ...state.scores } } : {})
+  }
+}
+
+function applyGameAction(game, action, userId, partnerId, partner1Id) {
+  const gameType = action.type === 'select' ? action.game_type : game?.game_type
+  if (!initialState[gameType]) throw new Error('Jenis permainan tidak dikenal.')
+
+  const currentState = game?.game_type === gameType
+    ? normalizeGameState(gameType, game.game_state)
+    : makeGameState(gameType)
+
+  if (action.type === 'select') {
+    return {
+      game_type: gameType,
+      game_state: game?.game_type === gameType ? currentState : makeGameState(gameType)
+    }
+  }
+
+  if (action.type === 'reset') {
+    return { game_type: gameType, game_state: makeGameState(gameType) }
+  }
+
+  if (gameType === 'tic_tac_toe' && action.type === 'move') {
+    const index = Number(action.index)
+    const board = [...(currentState.board || initialState.tic_tac_toe.board)]
+    if (!Number.isInteger(index) || index < 0 || index > 8 || board[index] || currentState.winner || currentState.draw ||
+      (currentState.turn && currentState.turn !== userId)) {
+      throw new Error('Langkah tidak tersedia atau bukan giliranmu.')
+    }
+
+    const mark = userId === partner1Id ? 'X' : 'O'
+    board[index] = mark
+    const won = winningLines.some(([a, b, c]) => board[a] && board[a] === board[b] && board[b] === board[c])
+    const draw = !won && board.every(Boolean)
+    return {
+      game_type: gameType,
+      game_state: {
+        board,
+        turn: won || draw ? null : partnerId,
+        winner: won ? userId : null,
+        winnerMark: won ? mark : null,
+        draw
+      }
+    }
+  }
+
+  if (gameType === 'rock_paper_scissors' && action.type === 'choose') {
+    if (!['rock', 'paper', 'scissors'].includes(action.choice)) throw new Error('Pilihan tidak valid.')
+    const round = currentState.result
+      ? { round: (currentState.round || 1) + 1, choices: {}, result: null }
+      : currentState
+    if (round.choices[userId]) throw new Error('Pilihanmu untuk ronde ini sudah tersimpan.')
+
+    const choices = { ...round.choices, [userId]: action.choice }
+    const firstChoice = choices[partnerId]
+    const yourChoice = choices[userId]
+    let result = null
+    if (firstChoice && yourChoice) {
+      if (firstChoice === yourChoice) result = 'draw'
+      else if (
+        (firstChoice === 'rock' && yourChoice === 'scissors') ||
+        (firstChoice === 'paper' && yourChoice === 'rock') ||
+        (firstChoice === 'scissors' && yourChoice === 'paper')
+      ) result = partnerId
+      else result = userId
+    }
+    return { game_type: gameType, game_state: { ...round, choices, result } }
+  }
+
+  if (gameType === 'couple_quiz' && action.type === 'answer') {
+    if (typeof action.answer !== 'string' || action.answer.length > 80 ||
+      currentState.revealed || currentState.answers[userId]) {
+      throw new Error('Jawaban tidak dapat dikirim.')
+    }
+    const answers = { ...currentState.answers, [userId]: action.answer }
+    return {
+      game_type: gameType,
+      game_state: {
+        ...currentState,
+        answers,
+        revealed: Boolean(answers[userId] && answers[partnerId])
+      }
+    }
+  }
+
+  if (gameType === 'couple_quiz' && action.type === 'next_question') {
+    if (!currentState.revealed) throw new Error('Tunggu sampai kalian berdua menjawab.')
+    const scores = { ...currentState.scores }
+    if (currentState.answers[userId] === currentState.answers[partnerId]) {
+      scores[userId] = (scores[userId] || 0) + 1
+      scores[partnerId] = (scores[partnerId] || 0) + 1
+    }
+    return {
+      game_type: gameType,
+      game_state: {
+        questionIndex: ((currentState.questionIndex || 0) + 1) % QUIZ_QUESTIONS.length,
+        answers: {},
+        scores,
+        revealed: false
+      }
+    }
+  }
+
+  throw new Error('Aksi permainan tidak dikenal.')
 }
 
 export default function CoupleGames({ couple, user }) {
@@ -43,17 +164,22 @@ export default function CoupleGames({ couple, user }) {
   const selectedGame = GAME_OPTIONS.find(item => item.id === game?.game_type)
 
   const loadGame = useCallback(async () => {
-    const { data, error: loadError } = await supabase.from('couple_games')
-      .select('id,couple_id,game_type,status,game_state,updated_by,updated_at')
-      .eq('couple_id', couple.id)
-      .maybeSingle()
-    if (loadError) {
-      setError(messageForSupabaseError(loadError))
-    } else {
-      setGame(data)
-      setError('')
+    try {
+      const { data, error: loadError } = await supabase.from('couple_games')
+        .select(gameColumns)
+        .eq('couple_id', couple.id)
+        .maybeSingle()
+      if (loadError) {
+        setError(logDatabaseError('Gagal memuat state permainan', loadError))
+      } else {
+        setGame(data)
+        setError('')
+      }
+    } catch (loadError) {
+      setError(logDatabaseError('Gagal memuat state permainan', loadError))
+    } finally {
+      setLoading(false)
     }
-    setLoading(false)
   }, [couple.id])
 
   useEffect(() => {
@@ -88,15 +214,38 @@ export default function CoupleGames({ couple, user }) {
     if (busy) return
     setBusy(true)
     setError('')
+    let databaseErrorContext = ''
     try {
-      const { data, error: actionError } = await supabase.rpc('submit_couple_game_action', {
-        p_couple_id: couple.id,
-        p_action: action
-      })
-      if (actionError) throw actionError
+      databaseErrorContext = 'Gagal memuat state permainan'
+      const { data: latestGame, error: loadError } = await supabase.from('couple_games')
+        .select(gameColumns)
+        .eq('couple_id', couple.id)
+        .maybeSingle()
+      if (loadError) throw loadError
+      databaseErrorContext = ''
+
+      const nextState = applyGameAction(latestGame, action, user.id, partnerId, couple.partner_1_id)
+      databaseErrorContext = 'Gagal menyimpan state permainan'
+      const { data, error: saveError } = await supabase.from('couple_games')
+        .upsert({
+          couple_id: couple.id,
+          game_type: nextState.game_type,
+          status: 'active',
+          game_state: nextState.game_state,
+          updated_by: user.id,
+          updated_at: new Date().toISOString()
+        }, { onConflict: 'couple_id' })
+        .select(gameColumns)
+        .single()
+      if (saveError) throw saveError
+      databaseErrorContext = ''
       setGame(data)
     } catch (actionError) {
-      setError(messageForSupabaseError(actionError))
+      if (databaseErrorContext || actionError?.code || actionError?.details || actionError?.hint) {
+        setError(logDatabaseError(databaseErrorContext || 'Gagal menyimpan state permainan', actionError))
+      } else {
+        setError(actionError?.message || 'Permainan belum dapat disinkronkan. Coba lagi.')
+      }
     } finally {
       setBusy(false)
     }

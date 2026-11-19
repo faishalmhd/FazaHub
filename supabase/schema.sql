@@ -135,6 +135,8 @@ create policy "Authenticated users can create a couple" on public.couples
 
 drop policy if exists "Authenticated access couple_games" on public.couple_games;
 drop policy if exists "Couple members can view games" on public.couple_games;
+drop policy if exists "Couple members can insert games" on public.couple_games;
+drop policy if exists "Couple members can update games" on public.couple_games;
 create policy "Couple members can view games" on public.couple_games
   for select to authenticated using (
     exists (
@@ -143,7 +145,31 @@ create policy "Couple members can view games" on public.couple_games
         and (couples.partner_1_id = auth.uid() or couples.partner_2_id = auth.uid())
     )
   );
-grant select on public.couple_games to authenticated;
+create policy "Couple members can insert games" on public.couple_games
+  for insert to authenticated with check (
+    exists (
+      select 1 from public.couples
+      where couples.id = couple_games.couple_id
+        and (couples.partner_1_id = auth.uid() or couples.partner_2_id = auth.uid())
+    )
+  );
+create policy "Couple members can update games" on public.couple_games
+  for update to authenticated
+  using (
+    exists (
+      select 1 from public.couples
+      where couples.id = couple_games.couple_id
+        and (couples.partner_1_id = auth.uid() or couples.partner_2_id = auth.uid())
+    )
+  )
+  with check (
+    exists (
+      select 1 from public.couples
+      where couples.id = couple_games.couple_id
+        and (couples.partner_1_id = auth.uid() or couples.partner_2_id = auth.uid())
+    )
+  );
+grant select, insert, update on public.couple_games to authenticated;
 
 -- Invitation codes are not exposed through a policy that lists all open rooms.
 -- Joining and leaving are handled by narrowly scoped RPCs instead of broad UPDATE policies.
